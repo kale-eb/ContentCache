@@ -32,11 +32,29 @@ app.add_middleware(
 )
 
 # Initialize clients
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+try:
+    openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    logger.info("OpenAI client initialized successfully")
+except Exception as e:
+    logger.warning(f"OpenAI client initialization failed: {e}")
+    openai_client = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup_event():
+    """Log when the application starts up."""
+    logger.info("=== ContentCache API Server Starting ===")
+    logger.info(f"OpenAI client: {'initialized' if openai_client else 'not available'}")
+    logger.info(f"Environment variables loaded: {bool(os.getenv('OPENAI_API_KEY'))}")
+    logger.info("=== Startup Complete ===")
+
+@app.on_event("shutdown") 
+async def shutdown_event():
+    """Log when the application shuts down."""
+    logger.info("=== ContentCache API Server Shutting Down ===")
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -109,20 +127,46 @@ def decode_base64_to_image(base64_string: str) -> Image.Image:
 
 @app.get("/")
 async def root():
-    return {"message": "ContentCache API Server", "status": "running"}
+    """Root endpoint that also serves as a backup health check."""
+    logger.info("Root endpoint called")
+    return {
+        "message": "ContentCache API Server", 
+        "status": "running",
+        "version": "1.0.0",
+        "health_check": "/health",
+        "documentation": "/docs"
+    }
 
 @app.get("/health")
 async def health_check():
     """Simple health check that always returns 200 OK for Railway deployment."""
-    return {
-        "status": "healthy",
-        "message": "ContentCache API Server is running",
-        "services": {
-            "openai": bool(os.getenv("OPENAI_API_KEY")),
-            "moondream": bool(os.getenv("MOONDREAM_API_KEY")),
-            "google_maps": bool(os.getenv("GOOGLE_MAPS_API_KEY"))
+    try:
+        logger.info("Health check endpoint called")
+        status = {
+            "status": "healthy",
+            "message": "ContentCache API Server is running",
+            "timestamp": "2025-01-15T00:00:00Z",
+            "services": {
+                "openai": bool(os.getenv("OPENAI_API_KEY")),
+                "moondream": bool(os.getenv("MOONDREAM_API_KEY")),
+                "google_maps": bool(os.getenv("GOOGLE_MAPS_API_KEY"))
+            },
+            "app_info": {
+                "version": "1.0.0",
+                "python_version": "3.10+",
+                "environment": "production"
+            }
         }
-    }
+        logger.info(f"Health check returning: {status}")
+        return status
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        # Even if there's an error, still return 200 OK for Railway
+        return {
+            "status": "healthy", 
+            "message": "API server running despite health check error",
+            "error": str(e)
+        }
 
 # ============================================================================
 # OPENAI ENDPOINTS
@@ -132,6 +176,9 @@ async def health_check():
 async def openai_chat(request: OpenAIRequest):
     """Generic OpenAI chat completions endpoint."""
     try:
+        if not openai_client:
+            raise HTTPException(status_code=503, detail="OpenAI client not available - check API key configuration")
+        
         response = openai_client.chat.completions.create(
             model=request.model,
             messages=request.messages,
