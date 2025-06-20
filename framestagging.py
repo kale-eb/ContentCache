@@ -3,6 +3,7 @@ from pathlib import Path
 from PIL import Image
 # BLIP imports commented out - using Moondream API only
 # from transformers import BlipProcessor, BlipForConditionalGeneration, AutoTokenizer, BlipImageProcessor, AutoModelForCausalLM
+#test comment
 
 from sentence_transformers import SentenceTransformer, util
 import os
