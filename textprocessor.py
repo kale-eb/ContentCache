@@ -443,6 +443,13 @@ class TextProcessor:
             json.dump(all_metadata, f, indent=2, ensure_ascii=False)
         
         print(f"✅ Text metadata saved to: {output_file}")
+        
+        # Generate embeddings for search functionality
+        try:
+            from embedding_generator import generate_text_embeddings
+            generate_text_embeddings(metadata['file_path'], metadata)
+        except Exception as e:
+            print(f"⚠️ Failed to generate text embeddings: {e}")
 
     def cleanup_text_processing(self, text_content=None, analysis=None, result=None):
         """
