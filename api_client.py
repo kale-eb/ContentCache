@@ -17,21 +17,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ContentCacheAPIClient:
-    def __init__(self, base_url: str = None):
-        """
-        Initialize the API client.
-        
-        Args:
-            base_url: Base URL of the FastAPI server. If None, tries environment variable
-                     or defaults to localhost for development.
-        """
-        if base_url:
-            self.base_url = base_url.rstrip('/')
-        else:
-            # Try environment variable first, fallback to localhost
-            self.base_url = os.getenv('CONTENTCACHE_API_URL', 'http://localhost:8000').rstrip('/')
-        
+    def __init__(self, base_url: str = "https://contentcache-production.up.railway.app"):
+        """Initialize the API client with railway production URL by default."""
+        self.base_url = base_url.rstrip('/')
+        self.session = requests.Session()
         logger.info(f"ContentCache API Client initialized with base URL: {self.base_url}")
+        
+        # Set timeout for all requests
+        self.session.timeout = 30
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[Any, Any]:
         """Make HTTP request to the API server."""

@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Model caches (these are huge and should be downloaded at runtime)
+model_cache/
+embeddings_cache/
+nltk_data/
+panns_data/
+
+# Large video files for testing
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Large backup files
+*.backup
+*.backup_*
+image_metadata.json.backup_*
+
+# Test data
+test_videos/
+cartwheelframes/
+
+# Development files
+.DS_Store
+.git/
+.gitignore
+.gitattributes
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Local configuration
+.env
+config.local.*
+
+# Cache directories
+.contentcache/
+
+# Documentation that's not needed in production
+*.md
+!README.md 
