@@ -235,6 +235,22 @@ class ContentCacheAPIClient:
         
         return self._make_request('POST', '/api/openai/text-analysis', json=payload)
     
+    def parse_search_query(self, query: str) -> Dict[str, Any]:
+        """
+        Parse search query to extract semantic components using OpenAI.
+        
+        Args:
+            query (str): Search query to parse
+            
+        Returns:
+            Dict[str, Any]: Parsed components with search_query, location, and date filters
+        """
+        payload = {
+            'query': query
+        }
+        
+        return self._make_request('POST', '/api/openai/parse-search-query', json=payload)
+    
     # ============================================================================
     # MOONDREAM METHODS
     # ============================================================================
@@ -324,6 +340,22 @@ class ContentCacheAPIClient:
         
         return self._make_request('POST', '/api/google/nearby-search', json=payload)
     
+    def google_forward_geocode(self, location_text: str) -> Dict[str, Any]:
+        """
+        Forward geocode location text using Google Maps API.
+        
+        Args:
+            location_text (str): Location text to geocode
+            
+        Returns:
+            Dict[str, Any]: Google Maps API response with coordinates
+        """
+        payload = {
+            'location_text': location_text
+        }
+        
+        return self._make_request('POST', '/api/google/forward-geocode', json=payload)
+
 
 
 # ============================================================================

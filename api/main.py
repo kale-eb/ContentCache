@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import openai
 import os
 import base64
@@ -100,7 +100,7 @@ class VideoSummaryRequest(BaseModel):
     video_metadata: Dict[str, Any]
     vision_analysis: Optional[str] = None
     text_data: Optional[Dict[str, Any]] = None
-    processed_location: Optional[str] = None
+    processed_location: Optional[Union[str, Dict[str, Any]]] = None
 
 class MoondreamRequest(BaseModel):
     image_base64: str
@@ -122,17 +122,23 @@ class AudioAnalysisRequest(BaseModel):
 class ImageAnalysisRequest(BaseModel):
     image_base64: str
     ocr_text_data: Optional[Dict[str, Any]] = None
-    processed_location: Optional[str] = None
+    processed_location: Optional[Union[str, Dict[str, Any]]] = None
 
 class ImageSummaryRequest(BaseModel):
     caption: str
     objects: List[str]
     text_data: Optional[Dict[str, Any]] = None
-    processed_location: Optional[str] = None
+    processed_location: Optional[Union[str, Dict[str, Any]]] = None
 
 class TextAnalysisRequest(BaseModel):
     file_path: str
     text_content: str
+
+class GoogleForwardGeocodeRequest(BaseModel):
+    location_text: str
+
+class SearchQueryParseRequest(BaseModel):
+    query: str
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -275,9 +281,17 @@ async def openai_video_summary(request: VideoSummaryRequest):
         if request.vision_analysis:
             content_parts.insert(1, f"Enhanced Vision Analysis: {request.vision_analysis}")
         
-        # Add processed location if available
+        # Add processed location if available (handle both old string format and new dict format)
         if request.processed_location:
-            content_parts.insert(-1, f"Pre-processed Location: {request.processed_location}")
+            if isinstance(request.processed_location, dict):
+                if request.processed_location.get('type') == 'coordinates':
+                    lat, lon = request.processed_location['latitude'], request.processed_location['longitude']
+                    content_parts.insert(-1, f"GPS Coordinates: {lat}, {lon}")
+                elif request.processed_location.get('type') == 'text':
+                    content_parts.insert(-1, f"Location Text: {request.processed_location['location_text']}")
+            else:
+                # Legacy string format
+                content_parts.insert(-1, f"Pre-processed Location: {request.processed_location}")
         
         # Add text data if available
         if request.text_data and request.text_data.get('prominent_text'):
@@ -528,12 +542,26 @@ async def openai_image_analysis(request: ImageAnalysisRequest):
                     f"Include this in section 3 if clearly readable. If the OCR text appears garbled or meaningless, skip section 3 entirely.\n\n"
                 )
         
-        # Add location information if available
+        # Add location information if available (handle both old string format and new dict format)
         if request.processed_location:
-            analysis_prompt += (
-                f"LOCATION: This image was taken at: {request.processed_location}\n"
-                f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
-            )
+            if isinstance(request.processed_location, dict):
+                if request.processed_location.get('type') == 'coordinates':
+                    lat, lon = request.processed_location['latitude'], request.processed_location['longitude']
+                    analysis_prompt += (
+                        f"LOCATION: This image was taken at GPS coordinates: {lat}, {lon}\n"
+                        f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
+                    )
+                elif request.processed_location.get('type') == 'text':
+                    analysis_prompt += (
+                        f"LOCATION: This image was taken at: {request.processed_location['location_text']}\n"
+                        f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
+                    )
+            else:
+                # Legacy string format
+                analysis_prompt += (
+                    f"LOCATION: This image was taken at: {request.processed_location}\n"
+                    f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
+                )
         
         analysis_prompt += "Be thorough and specific in your analysis."
         
@@ -595,9 +623,17 @@ async def openai_image_summary(request: ImageSummaryRequest):
             prompt += f"Detected Text (OCR): {prominent_text}\n"
             prompt += "Please incorporate any relevant text information into your summary.\n\n"
         
-        # Add location information if available
+        # Add location information if available (handle both old string format and new dict format)
         if request.processed_location and request.processed_location != 'None':
-            prompt += f"Location: {request.processed_location}\n"
+            if isinstance(request.processed_location, dict):
+                if request.processed_location.get('type') == 'coordinates':
+                    lat, lon = request.processed_location['latitude'], request.processed_location['longitude']
+                    prompt += f"Location: GPS coordinates {lat}, {lon}\n"
+                elif request.processed_location.get('type') == 'text':
+                    prompt += f"Location: {request.processed_location['location_text']}\n"
+            else:
+                # Legacy string format
+                prompt += f"Location: {request.processed_location}\n"
             prompt += "Please incorporate this location information into your summary where relevant.\n\n"
         
         # Built-in function schema
@@ -726,6 +762,106 @@ Format your response as clean JSON with exactly these field names."""
         logger.error(f"OpenAI Text Analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/openai/parse-search-query")
+async def parse_search_query(request: SearchQueryParseRequest):
+    """Parse search query to extract semantic components using OpenAI."""
+    try:
+        # Get current date for date calculations
+        from datetime import datetime, timezone
+        current_date = datetime.now(timezone.utc).isoformat()
+        
+        # Built-in prompt for search query parsing
+        prompt = f"""Parse this search query and extract semantic components for a content search system.
+
+Current date/time: {current_date}
+
+Search query: "{request.query}"
+
+Extract and return:
+1. search_query: The core search terms (remove location/date filters)
+2. location: Specific location to geocode (university, landmark, city, etc.) or null
+3. date: Date range filter or null
+
+For dates:
+- Convert relative terms like "last 2 months", "past week", "yesterday" to UTC date ranges
+- Return as {{"start": "YYYY-MM-DDTHH:MM:SS.000000Z", "end": "YYYY-MM-DDTHH:MM:SS.000000Z"}}
+- If no date mentioned, return null
+
+For locations:
+- Extract specific places like "Brown University", "Central Park", "San Francisco"
+- Convert casual references like "brown" → "Brown University", "mit" → "MIT"
+- If no location mentioned, return null
+
+Examples:
+- "exercise videos at brown within the last two months" → search_query: "exercise videos", location: "Brown University", date: {{start: "2025-04-20...", end: "2025-06-20..."}}
+- "machine learning papers" → search_query: "machine learning papers", location: null, date: null
+- "photos from yesterday" → search_query: "photos", location: null, date: {{start: "2025-06-19...", end: "2025-06-19..."}}
+
+Be precise with location names for geocoding accuracy."""
+
+        # Function definition for structured output
+        function_def = {
+            "name": "parse_search_components",
+            "description": "Parse search query into semantic components",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_query": {
+                        "type": "string",
+                        "description": "Core search terms with location and date filters removed"
+                    },
+                    "location": {
+                        "type": ["string", "null"],
+                        "description": "Specific location to geocode (full name preferred) or null if none"
+                    },
+                    "date": {
+                        "type": ["object", "null"],
+                        "description": "Date range filter with start and end UTC timestamps, or null if none",
+                        "properties": {
+                            "start": {
+                                "type": "string",
+                                "description": "Start date in UTC ISO format"
+                            },
+                            "end": {
+                                "type": "string", 
+                                "description": "End date in UTC ISO format"
+                            }
+                        }
+                    }
+                },
+                "required": ["search_query", "location", "date"]
+            }
+        }
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a search query parser that extracts semantic components for content filtering."},
+                {"role": "user", "content": prompt}
+            ],
+            tools=[{"type": "function", "function": function_def}],
+            tool_choice={"type": "function", "function": {"name": "parse_search_components"}},
+            max_tokens=400
+        )
+
+        # Extract the structured JSON output
+        if response.choices[0].message.tool_calls:
+            function_args = response.choices[0].message.tool_calls[0].function.arguments
+            import json
+            parsed_result = json.loads(function_args)
+            
+            return {
+                "original_query": request.query,
+                "parsed": parsed_result,
+                "usage": response.usage.model_dump() if response.usage else None
+            }
+        else:
+            raise HTTPException(status_code=500, detail="No function call found in OpenAI response")
+            
+    except Exception as e:
+        logger.error(f"Search query parsing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # MOONDREAM ENDPOINTS
 # ============================================================================
@@ -839,6 +975,41 @@ async def google_nearby_search(request: GoogleMapsRequest):
         return response.json()
     except Exception as e:
         logger.error(f"Google nearby search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/google/forward-geocode")
+async def google_forward_geocode(request: GoogleForwardGeocodeRequest):
+    """Forward geocode location text to coordinates using Google Maps API."""
+    try:
+        # Check if Google Maps API key is available
+        google_maps_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        if not google_maps_key:
+            raise HTTPException(status_code=503, detail="Google Maps API key not configured")
+        
+        import httpx
+        
+        # Google Maps Geocoding API URL for forward geocoding
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            'address': request.location_text,
+            'key': google_maps_key
+        }
+        
+        # Make the API request
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            logger.info(f"Google Forward Geocoding API response status: {result.get('status')}")
+            
+            return result
+            
+    except httpx.HTTPError as e:
+        logger.error(f"Google Forward Geocoding API HTTP error: {e}")
+        raise HTTPException(status_code=502, detail="Google Maps API request failed")
+    except Exception as e:
+        logger.error(f"Google Forward Geocoding API error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================

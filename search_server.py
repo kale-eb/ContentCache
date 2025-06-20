@@ -8,7 +8,7 @@ import os
 import json
 import pickle
 import time
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
@@ -18,6 +18,8 @@ from pathlib import Path
 from config import (get_models_cache_dir, get_embeddings_cache_dir, 
                    get_video_metadata_path, get_text_metadata_path,
                    get_image_metadata_path, get_audio_metadata_path)
+import math
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -262,17 +264,31 @@ class ContentCacheSearchServer:
             print(f"✅ Loaded {content_type} embeddings: {embeddings_loaded} items from {len(embedding_files)} cache files")
 
     def _perform_search(self, query: str, content_type: str = 'all', top_k: int = 10) -> List[Dict]:
-        """Perform semantic search on content with optional type filtering."""
+        """Perform semantic search with intelligent filtering on results."""
         if not self.sentence_model:
             raise RuntimeError("SentenceTransformer model not loaded")
         
-        # Determine which content types to search
-        if content_type == 'all':
-            search_types = ['video', 'text', 'audio', 'image']
-        elif content_type in self.content_embeddings:
-            search_types = [content_type]
-        else:
-            raise ValueError(f"Invalid content type: {content_type}")
+        # Parse the query using OpenAI to extract semantic components
+        try:
+            from api_client import get_api_client
+            client = get_api_client()
+            parse_result = client.parse_search_query(query)
+            
+            parsed = parse_result.get('parsed', {})
+            core_query = parsed.get('search_query', query)
+            location_text = parsed.get('location')
+            date_filter = parsed.get('date')
+            
+            print(f"🧠 Query parsed - Core: '{core_query}', Location: {location_text}, Date: {date_filter}")
+            
+        except Exception as e:
+            print(f"⚠️ Query parsing failed, using original query: {e}")
+            core_query = query
+            location_text = None
+            date_filter = None
+        
+        # Step 1: Perform semantic search with threshold
+        search_types = ['video', 'text', 'audio', 'image'] if content_type == 'all' else [content_type]
         
         # Collect all embeddings to search
         all_embeddings = {}
@@ -282,75 +298,195 @@ class ContentCacheSearchServer:
                 for path, embedding in self.content_embeddings[ctype].items()
             })
         
-        if not all_embeddings:
-            return []
-
-        # Encode the search query
-        query_embedding = self.sentence_model.encode([query])
-        
-        # Calculate similarities
-        similarities = []
-        for type_path, embedding in all_embeddings.items():
-            if embedding is not None:
-                # Handle different embedding formats
-                if isinstance(embedding, list):
-                    embedding = np.array(embedding)
+        semantic_results = []
+        if all_embeddings:
+            # Encode the core search query (without location/date terms)
+            query_embedding = self.sentence_model.encode([core_query])
+            
+            # Calculate similarities
+            similarities = []
+            for type_path, embedding in all_embeddings.items():
+                if embedding is not None:
+                    # Handle different embedding formats
+                    if isinstance(embedding, list):
+                        embedding = np.array(embedding)
+                    
+                    # Calculate cosine similarity
+                    similarity = util.pytorch_cos_sim(query_embedding, embedding).item()
+                    similarities.append((type_path, similarity))
+            
+            # Filter by similarity threshold (0.25) and sort
+            filtered_similarities = [(tp, sim) for tp, sim in similarities if sim >= 0.25]
+            filtered_similarities.sort(key=lambda x: x[1], reverse=True)
+            
+            print(f"🔍 Semantic search: {len(similarities)} total, {len(filtered_similarities)} above 0.25 threshold")
+            
+            # Format semantic results
+            for type_path, similarity in filtered_similarities:
+                # Parse content type and path
+                ctype, file_path = type_path.split(':', 1)
                 
-                # Calculate cosine similarity
-                similarity = util.pytorch_cos_sim(query_embedding, embedding).item()
-                similarities.append((type_path, similarity))
-        
-        # Sort by similarity and get top results
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        top_results = similarities[:top_k]
-        
-        # Format results
-        results = []
-        for type_path, similarity in top_results:
-            # Parse content type and path
-            ctype, file_path = type_path.split(':', 1)
-            
-            result = {
-                'content_type': ctype,
-                'file_path': file_path,
-                'filename': os.path.basename(file_path),
-                'similarity_score': round(similarity, 4)
-            }
-            
-            # Add type-specific metadata if available
-            if file_path in self.content_metadata[ctype]:
-                metadata = self.content_metadata[ctype][file_path]
+                result = {
+                    'content_type': ctype,
+                    'file_path': file_path,
+                    'filename': os.path.basename(file_path),
+                    'similarity_score': round(similarity, 4),
+                    'search_type': 'semantic'
+                }
                 
-                if ctype == 'video':
-                    result.update({
-                        'summary': metadata.get('video_summary', ''),
-                        'tags': metadata.get('tags', {}),
-                        'duration': metadata.get('metadata', {}).get('duration', 0),
-                        'location': metadata.get('metadata', {}).get('location', '')
-                    })
-                elif ctype == 'text':
-                    analysis = metadata.get('analysis', {})
-                    result.update({
-                        'summary': analysis.get('summary', ''),
-                        'key_topics': analysis.get('key_topics', []),
-                        'file_type': metadata.get('file_type', ''),
-                        'content_preview': metadata.get('content_preview', '')[:200] + '...' if metadata.get('content_preview', '') else ''
-                    })
-                elif ctype == 'image':
-                    result.update({
-                        'analysis': metadata.get('analysis', ''),
-                        'summary': metadata.get('summary', ''),
-                        'location': metadata.get('location', '')
-                    })
-                elif ctype == 'audio':
-                    result.update({
-                        'analysis': metadata.get('analysis', ''),
-                        'summary': metadata.get('summary', '')
-                    })
-            
-            results.append(result)
+                # Add metadata from content metadata
+                if file_path in self.content_metadata[ctype]:
+                    metadata = self.content_metadata[ctype][file_path]
+                    
+                    # Add content-specific metadata
+                    if ctype == 'video':
+                        result['summary'] = metadata.get('video_summary', '')[:200] + '...' if len(metadata.get('video_summary', '')) > 200 else metadata.get('video_summary', '')
+                        result['tags'] = metadata.get('tags', {})
+                    elif ctype == 'text':
+                        result['summary'] = metadata.get('analysis', {}).get('summary', '')
+                        result['file_type'] = metadata.get('file_type', '')
+                    elif ctype in ['image', 'audio']:
+                        result['summary'] = metadata.get('analysis', '')[:200] + '...' if len(metadata.get('analysis', '')) > 200 else metadata.get('analysis', '')
+                
+                semantic_results.append(result)
         
-        return results
+        # Step 2: Apply location filtering if specified
+        if location_text:
+            semantic_results = self._apply_location_filter(semantic_results, location_text)
+        
+        # Step 3: Apply date filtering with bucketing if specified
+        if date_filter:
+            semantic_results = self._apply_date_filter_with_buckets(semantic_results, date_filter)
+        
+        # Return top results
+        return semantic_results[:top_k]
+    
+    def _apply_location_filter(self, results: List[Dict], location_text: str) -> List[Dict]:
+        """Apply location filtering to search results."""
+        print(f"🌍 Applying location filter for: '{location_text}'")
+        
+        # Try to geocode the location
+        coordinates = location_search.forward_geocode(location_text)
+        
+        if not coordinates:
+            print(f"⚠️ Could not geocode location: {location_text}")
+            return results
+        
+        target_lat, target_lon = coordinates
+        print(f"📍 Target coordinates: {target_lat}, {target_lon}")
+        
+        location_filtered = []
+        for result in results:
+            file_path = result['file_path']
+            content_type = result['content_type']
+            
+            if file_path in self.content_metadata[content_type]:
+                metadata = self.content_metadata[content_type][file_path]
+                location_data = metadata.get('metadata', {}).get('location')
+                
+                # Handle both new coordinate format and old string format
+                content_coords = None
+                
+                if isinstance(location_data, dict) and location_data.get('type') == 'coordinates':
+                    # New coordinate format
+                    content_coords = (location_data.get('latitude'), location_data.get('longitude'))
+                elif isinstance(location_data, str) and location_data not in ['None', '']:
+                    # Old string format - try to extract coordinates or geocode
+                    # For now, we'll include all string-based locations as potential matches
+                    # TODO: Could implement reverse-geocoding of old string format
+                    print(f"📍 Found string location: {location_data}")
+                    # Include in results but without distance calculation
+                    result['location_match'] = 'text_based'
+                    result['location_text'] = location_data
+                    location_filtered.append(result)
+                    continue
+                
+                if content_coords and content_coords[0] is not None and content_coords[1] is not None:
+                    # Calculate distance
+                    distance = location_search.calculate_distance(
+                        target_lat, target_lon, content_coords[0], content_coords[1]
+                    )
+                    
+                    # Include if within 50km
+                    if distance <= 50:
+                        result['location_match'] = 'coordinate_based'
+                        result['distance_km'] = round(distance, 2)
+                        result['location'] = {
+                            'coordinates': [content_coords[0], content_coords[1]],
+                            'distance_from_query': f"{round(distance, 2)} km"
+                        }
+                        location_filtered.append(result)
+        
+        print(f"🗺️ Location filter: {len(results)} → {len(location_filtered)} results")
+        
+        # Sort by distance if we have coordinate-based matches
+        coordinate_matches = [r for r in location_filtered if r.get('location_match') == 'coordinate_based']
+        text_matches = [r for r in location_filtered if r.get('location_match') == 'text_based']
+        
+        # Sort coordinate matches by distance, keep text matches by similarity
+        coordinate_matches.sort(key=lambda x: x.get('distance_km', float('inf')))
+        
+        return coordinate_matches + text_matches
+    
+    def _apply_date_filter_with_buckets(self, results: List[Dict], date_filter: Dict) -> List[Dict]:
+        """Apply date filtering with bucketing: in-range results first, then out-of-range."""
+        if not date_filter or not date_filter.get('start') or not date_filter.get('end'):
+            return results
+        
+        try:
+            from datetime import datetime
+            start_date = datetime.fromisoformat(date_filter['start'].replace('Z', '+00:00'))
+            end_date = datetime.fromisoformat(date_filter['end'].replace('Z', '+00:00'))
+            
+            print(f"📅 Applying date filter: {start_date.date()} to {end_date.date()}")
+            
+            in_range_results = []
+            out_of_range_results = []
+            
+            for result in results:
+                file_path = result['file_path']
+                content_type = result['content_type']
+                
+                if file_path in self.content_metadata[content_type]:
+                    metadata = self.content_metadata[content_type][file_path]
+                    
+                    # Get date from metadata
+                    date_recorded_str = metadata.get('metadata', {}).get('date_recorded')
+                    if date_recorded_str and date_recorded_str != 'None':
+                        try:
+                            date_recorded = datetime.fromisoformat(date_recorded_str.replace('Z', '+00:00'))
+                            
+                            # Add date info to result
+                            result['date_recorded'] = date_recorded.date().isoformat()
+                            
+                            # Check if date falls within filter range
+                            if start_date <= date_recorded <= end_date:
+                                result['date_match'] = 'in_range'
+                                in_range_results.append(result)
+                            else:
+                                result['date_match'] = 'out_of_range'
+                                out_of_range_results.append(result)
+                        except ValueError:
+                            # If date parsing fails, put in out-of-range bucket
+                            result['date_match'] = 'parse_error'
+                            out_of_range_results.append(result)
+                    else:
+                        # If no date metadata, put in out-of-range bucket
+                        result['date_match'] = 'no_date'
+                        out_of_range_results.append(result)
+                else:
+                    # If no metadata, put in out-of-range bucket
+                    result['date_match'] = 'no_metadata'
+                    out_of_range_results.append(result)
+            
+            print(f"📅 Date bucketing: {len(in_range_results)} in range, {len(out_of_range_results)} out of range")
+            
+            # Return in-range results first, then out-of-range
+            return in_range_results + out_of_range_results
+            
+        except Exception as e:
+            print(f"⚠️ Date filtering error: {e}")
+            return results
 
     def run(self, debug=False):
         """Start the Flask server."""
@@ -366,6 +502,131 @@ class ContentCacheSearchServer:
         print(f"📊 Total: {total_metadata} items with metadata, {total_embeddings} with embeddings")
         
         self.app.run(host='0.0.0.0', port=self.port, debug=debug, threaded=True)
+
+class LocationSearch:
+    """Handle location-based search functionality"""
+    
+    def __init__(self):
+        self.location_patterns = [
+            # University patterns
+            r'\b([a-zA-Z\s]+(?:university|college|school|institute|academy))\b',
+            # City, State patterns
+            r'\b([a-zA-Z\s]+),\s*([a-zA-Z\s]+)\b',
+            # Landmark patterns
+            r'\b(golden gate bridge|statue of liberty|eiffel tower|times square|central park)\b',
+            # General location words
+            r'\b(downtown|uptown|city center|campus|park|beach|mountain|lake|river)\s+([a-zA-Z\s]+)\b',
+            r'\b([a-zA-Z\s]+)\s+(downtown|uptown|city center|campus|park|beach|mountain|lake|river)\b',
+        ]
+    
+    def detect_location_query(self, query: str) -> Optional[str]:
+        """Detect if query contains location references"""
+        query_lower = query.lower()
+        
+        # First check for explicit location keywords that indicate spatial queries
+        explicit_location_indicators = [
+            'near', 'at', 'in', 'around', 'close to', 'nearby', 'from'
+        ]
+        
+        has_location_indicator = any(indicator in query_lower for indicator in explicit_location_indicators)
+        
+        # Check for location patterns only if we have location indicators OR specific landmarks
+        for pattern in self.location_patterns:
+            match = re.search(pattern, query_lower, re.IGNORECASE)
+            if match:
+                matched_text = match.group(0).strip()
+                
+                # For university/landmark patterns, always consider them location queries
+                if any(word in matched_text for word in ['university', 'college', 'school', 'institute', 'academy', 'bridge', 'park']):
+                    return matched_text
+                
+                # For other patterns, only if we have explicit location indicators
+                if has_location_indicator:
+                    return matched_text
+        
+        # Check for location keywords with following text (only if explicit indicators present)
+        if has_location_indicator:
+            location_keywords = [
+                'near', 'at', 'in', 'around', 'close to', 'nearby', 'from'
+            ]
+            
+            for keyword in location_keywords:
+                if keyword in query_lower:
+                    # Extract potential location after the keyword
+                    parts = query_lower.split(keyword, 1)
+                    if len(parts) > 1:
+                        potential_location = parts[1].strip()
+                        # Clean up and return meaningful location text (must be reasonable length)
+                        if len(potential_location) > 2 and len(potential_location) < 50:
+                            return f"{keyword} {potential_location}".strip()
+        
+        return None
+    
+    def forward_geocode(self, location_text: str) -> Optional[Tuple[float, float]]:
+        """Convert location text to coordinates using Google Maps API"""
+        try:
+            from api_client import get_api_client
+            
+            # Use Google Maps Geocoding API via our API server
+            # Note: We'll need to add a forward geocoding endpoint
+            client = get_api_client()
+            response = client.google_forward_geocode(location_text)
+            
+            if response and response.get('status') == 'OK' and response.get('results'):
+                result = response['results'][0]
+                geometry = result.get('geometry', {})
+                location = geometry.get('location', {})
+                
+                lat = location.get('lat')
+                lng = location.get('lng')
+                
+                if lat is not None and lng is not None:
+                    return (float(lat), float(lng))
+            
+        except Exception as e:
+            print(f"⚠️ Forward geocoding failed: {e}")
+        
+        return None
+    
+    def calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Calculate distance between two coordinates in kilometers using Haversine formula"""
+        # Convert to radians
+        lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+        
+        # Haversine formula
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        
+        # Earth's radius in kilometers
+        r = 6371
+        return c * r
+    
+    def find_nearby_content(self, target_lat: float, target_lon: float, all_metadata: Dict, 
+                          max_distance_km: float = 50) -> List[Tuple[str, float]]:
+        """Find content within max_distance_km of target coordinates"""
+        nearby_content = []
+        
+        for file_path, metadata in all_metadata.items():
+            location_data = metadata.get('metadata', {}).get('location')
+            
+            if location_data and isinstance(location_data, dict) and location_data.get('type') == 'coordinates':
+                content_lat = location_data.get('latitude')
+                content_lon = location_data.get('longitude')
+                
+                if content_lat is not None and content_lon is not None:
+                    distance = self.calculate_distance(target_lat, target_lon, content_lat, content_lon)
+                    
+                    if distance <= max_distance_km:
+                        nearby_content.append((file_path, distance))
+        
+        # Sort by distance (closest first)
+        nearby_content.sort(key=lambda x: x[1])
+        return nearby_content
+
+# Initialize location search
+location_search = LocationSearch()
 
 def main():
     """Main entry point."""

@@ -178,25 +178,50 @@ def convert_location_to_readable(location_text):
     print(f"⚠️ Using deprecated convert_location_to_readable() - consider updating to use location_utils directly")
     return process_location_from_metadata(location_text)
 
-def extract_and_convert_image_location(image_path):
+def extract_and_store_image_location_coordinates(image_path):
     """
-    Extract location information from image EXIF data and convert to readable format using Google Maps.
+    Extract location coordinates from image EXIF data and store them as raw coordinates.
+    No longer converts to readable text - coordinates will be used for proximity search.
     
     Args:
         image_path (str): Path to the image file
         
     Returns:
-        str: Readable location string or None if no location found
+        dict: Location data with coordinates or None if no location found
     """
     # Extract GPS coordinates from EXIF
     gps_coords = extract_gps_from_exif(image_path)
     
     if gps_coords:
-        # Convert coordinates to readable location using Google Maps
-        result = process_location_from_metadata(gps_coords)
-        if result:
-            print(f"📍 Image location: {gps_coords} -> {result}")
-        return result
+        try:
+            # Parse the GPS coordinates string (e.g., "37.7749, -122.4194")
+            import re
+            coord_pattern = r'([+-]?\d+\.?\d*)[,\s]*([+-]?\d+\.?\d*)'
+            match = re.search(coord_pattern, gps_coords)
+            
+            if match:
+                lat, lon = float(match.group(1)), float(match.group(2))
+                
+                # Validate coordinate ranges
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    location_data = {
+                        'type': 'coordinates',
+                        'latitude': lat,
+                        'longitude': lon,
+                        'raw_string': gps_coords
+                    }
+                    print(f"📍 Image coordinates extracted: {lat}, {lon}")
+                    return location_data
+                else:
+                    print(f"⚠️ Invalid coordinate ranges: lat={lat}, lon={lon}")
+                    return None
+            else:
+                print(f"⚠️ Could not parse GPS coordinates: {gps_coords}")
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Error processing GPS coordinates: {e}")
+            return None
     
     return None
 
@@ -303,7 +328,7 @@ def analyze_single_image_with_vision_api(image_path):
     
     # Extract and process location information
     print("📍 Processing location information...")
-    processed_location = extract_and_convert_image_location(image_path)
+    processed_location = extract_and_store_image_location_coordinates(image_path)
     if processed_location:
         print(f"✓ Location processed: {processed_location}")
     else:
@@ -909,7 +934,7 @@ class ImageProcessor:
                 # macOS: use birth time if available, otherwise creation time
                 if hasattr(stat, 'st_birthtime'):
                     timestamp = datetime.fromtimestamp(stat.st_birthtime, tz=timezone.utc)
-                else:
+        else:
                     timestamp = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
             else:
                 # Linux/Unix: use modification time (creation time not reliably available)
@@ -949,7 +974,7 @@ class ImageProcessor:
             # For other types, try to convert to basic Python types
             elif isinstance(value, (int, float, str, bool)) or value is None:
                 return value
-            else:
+        else:
                 # For anything else, convert to string
                 return str(value)
                 
@@ -1103,7 +1128,7 @@ Format your response as clean JSON with exactly these field names."""
             dict: Complete analysis results
         """
         print(f"🖼️ Processing image: {os.path.basename(image_path)}")
-        
+            
         # Step 1: Get image metadata
         print("  📊 Extracting metadata...")
         metadata = self.get_image_metadata(image_path)
@@ -1168,7 +1193,7 @@ Format your response as clean JSON with exactly these field names."""
                 metadata = {}
         else:
             metadata = {}
-        
+            
         # Save using absolute path as key
         abs_path = os.path.abspath(image_path)
         metadata[abs_path] = result
@@ -1191,7 +1216,7 @@ def cleanup_image_processing(metadata=None, caption=None, analysis=None, result=
     Returns:
         float: Amount of memory freed in MB
     """
-    try:
+            try:
         import psutil
         import gc
         

@@ -122,15 +122,16 @@ def convert_coordinates_to_location(location_text):
     debug_print(f"⚠️ Using deprecated convert_coordinates_to_location() - consider updating to use location_utils directly")
     return process_location_from_metadata(location_text)
 
-def extract_and_convert_location(video_metadata):
+def extract_and_store_location_coordinates(video_metadata):
     """
-    Extract location information from video metadata and convert coordinates to readable format using Google Maps via API server.
+    Extract location coordinates from video metadata and store them as raw coordinates.
+    No longer converts to readable text - coordinates will be used for proximity search.
     
     Args:
         video_metadata (dict): Video metadata from ffprobe
         
     Returns:
-        str: Readable location string or None if no location found
+        dict: Location data with coordinates or None if no location found
     """
     if not video_metadata:
         return None
@@ -162,7 +163,7 @@ def extract_and_convert_location(video_metadata):
                 if field in stream_tags and stream_tags[field]:
                     location_sources.append(stream_tags[field])
     
-    # Process each potential location source using Google Maps via API server
+    # Process each potential location source to extract coordinates
     for location_data in location_sources:
         if not location_data or location_data.lower() in ['none', 'null', '']:
             continue
@@ -181,25 +182,27 @@ def extract_and_convert_location(video_metadata):
                 if match:
                     lat, lon = float(match.group(1)), float(match.group(2))
                     
-                    # Use API server for Google Maps geocoding
-                    try:
-                        api_response = api_client.get_api_client().google_reverse_geocode(lat, lon)
-                        if api_response and api_response.get('status') == 'OK' and api_response.get('results'):
-                            # Extract formatted address from first result
-                            result = api_response['results'][0]
-                            converted_location = result.get('formatted_address', location_str)
-                            debug_print(f"📍 Video location (via API): {location_str} -> {converted_location}")
-                            return converted_location
-                    except Exception as api_error:
-                        debug_print(f"⚠️ API server geocoding failed: {api_error}")
-                        # Fallback to original location processing
-                        pass
-                
-                # Fallback to original location processing
-                converted_location = process_location_from_metadata(location_str)
-                if converted_location:
-                    debug_print(f"📍 Video location (fallback): {location_str} -> {converted_location}")
-                    return converted_location
+                    # Validate coordinate ranges
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        location_data = {
+                            'type': 'coordinates',
+                            'latitude': lat,
+                            'longitude': lon,
+                            'raw_string': location_str
+                        }
+                        debug_print(f"📍 Video coordinates extracted: {lat}, {lon}")
+                        return location_data
+                    else:
+                        debug_print(f"⚠️ Invalid coordinate ranges: lat={lat}, lon={lon}")
+                        continue
+                else:
+                    # If no coordinates found, store as text for potential future processing
+                    debug_print(f"📍 Video location (text): {location_str}")
+                    return {
+                        'type': 'text',
+                        'location_text': location_str,
+                        'raw_string': location_str
+                    }
                     
             except Exception as e:
                 debug_print(f"⚠️ Location processing error: {e}")
@@ -815,7 +818,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     # Step 3: Extract video metadata (quick operation, run synchronously)
     print("Step 3: Extracting video metadata...")
     video_metadata = extract_video_metadata(vid_path)
-    processed_location = extract_and_convert_location(video_metadata)
+    processed_location = extract_and_store_location_coordinates(video_metadata)
     if processed_location:
         print(f"✓ Location processed: {processed_location}")
     else:
