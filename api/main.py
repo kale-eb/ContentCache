@@ -31,6 +31,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configure logging (must be before client initialization)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Initialize clients
 try:
     openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -38,10 +42,6 @@ try:
 except Exception as e:
     logger.warning(f"OpenAI client initialization failed: {e}")
     openai_client = None
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
