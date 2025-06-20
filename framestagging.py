@@ -272,7 +272,7 @@ def process_frames_with_moondream_api(frames_dir, vid_path):
     except ImportError:
         print("❌ Moondream SDK not installed. Install with: pip install moondream")
         return []
-except Exception as e:
+    except Exception as e:
         print(f"❌ Error initializing Moondream SDK: {e}")
         return []
     

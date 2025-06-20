@@ -934,7 +934,7 @@ class ImageProcessor:
                 # macOS: use birth time if available, otherwise creation time
                 if hasattr(stat, 'st_birthtime'):
                     timestamp = datetime.fromtimestamp(stat.st_birthtime, tz=timezone.utc)
-        else:
+                else:
                     timestamp = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
             else:
                 # Linux/Unix: use modification time (creation time not reliably available)
@@ -974,7 +974,7 @@ class ImageProcessor:
             # For other types, try to convert to basic Python types
             elif isinstance(value, (int, float, str, bool)) or value is None:
                 return value
-        else:
+            else:
                 # For anything else, convert to string
                 return str(value)
                 
@@ -1216,7 +1216,7 @@ def cleanup_image_processing(metadata=None, caption=None, analysis=None, result=
     Returns:
         float: Amount of memory freed in MB
     """
-            try:
+    try:
         import psutil
         import gc
         

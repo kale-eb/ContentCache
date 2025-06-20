@@ -225,7 +225,7 @@ if __name__ == "__main__":
     # Test comprehensive analysis
     result = analyze_audio_comprehensive(audio_path)
     print("\n=== Comprehensive Audio Analysis ===")
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2)) 
     
     # Test OpenAI analysis (optional)
     try:

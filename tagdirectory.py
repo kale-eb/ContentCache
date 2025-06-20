@@ -701,17 +701,16 @@ def batch_process_files(directory):
     
     print("Processing complete!")
     
-    # Final memory reporting
+        # Final memory reporting
     final_memory_after_cleanup = get_memory_usage()
-        total_memory_change = final_memory_after_cleanup - stats["memory_stats"]["initial"]
+    total_memory_change = final_memory_after_cleanup - stats["memory_stats"]["initial"]
     print(f"📊 Final memory usage: {final_memory_after_cleanup:.1f} MB")
-        print(f"📊 Net memory change from start: {total_memory_change:+.1f} MB")
+    print(f"📊 Net memory change from start: {total_memory_change:+.1f} MB")
         
-        if total_memory_change < 100:
-            print(f"✅ Memory growth successfully controlled!")
-        else:
+    if total_memory_change < 100:
+        print(f"✅ Memory growth successfully controlled!")
+    else:
         print(f"⚠️  Memory growth: {total_memory_change:.1f} MB")
-        
         print(f"💡 Models remain loaded for future processing")
 
 if __name__ == "__main__":
