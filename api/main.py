@@ -37,8 +37,30 @@ logger = logging.getLogger(__name__)
 
 # Initialize clients
 try:
-    openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    logger.info("OpenAI client initialized successfully")
+    # Log OpenAI version for debugging
+    logger.info(f"OpenAI library version: {openai.__version__}")
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        logger.info("OpenAI API key found, attempting client initialization...")
+        # Try different initialization methods for version compatibility
+        try:
+            openai_client = openai.OpenAI(api_key=api_key)
+            logger.info("✅ OpenAI client initialized successfully")
+        except TypeError as te:
+            # Handle version compatibility issues (like the proxies argument)
+            logger.warning(f"Standard initialization failed with TypeError: {te}")
+            logger.info("Attempting alternative initialization method...")
+            try:
+                # Try with minimal arguments
+                openai_client = openai.OpenAI(api_key=api_key, timeout=30.0)
+                logger.info("✅ OpenAI client initialized with alternative method")
+            except Exception as e2:
+                logger.warning(f"Alternative initialization also failed: {e2}")
+                openai_client = None
+    else:
+        logger.warning("No OpenAI API key provided")
+        openai_client = None
 except Exception as e:
     logger.warning(f"OpenAI client initialization failed: {e}")
     openai_client = None
