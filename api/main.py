@@ -113,8 +113,10 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Simple health check that always returns 200 OK for Railway deployment."""
     return {
         "status": "healthy",
+        "message": "ContentCache API Server is running",
         "services": {
             "openai": bool(os.getenv("OPENAI_API_KEY")),
             "moondream": bool(os.getenv("MOONDREAM_API_KEY")),
