@@ -12,7 +12,9 @@ from pathlib import Path
 # Base directories
 def get_app_cache_dir():
     """Get the main application cache directory."""
-    cache_dir = os.path.join(os.getcwd(), ".contentcache")
+    # Always use project root directory (go up two levels from backend/processing)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    cache_dir = os.path.join(project_root, ".contentcache")
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 

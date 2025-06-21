@@ -565,7 +565,7 @@ if __name__ == "__main__":
         metadata_file = args.metadata_file
     else:
         # Use config paths
-        from config import (get_video_metadata_path, get_image_metadata_path, 
+        from .config import (get_video_metadata_path, get_image_metadata_path, 
                           get_audio_metadata_path, get_text_metadata_path)
         
         metadata_paths = {

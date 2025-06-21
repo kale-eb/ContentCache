@@ -7,6 +7,8 @@ import psutil
 import time
 import atexit
 from datetime import datetime
+
+# Simple local imports since all files are in the same directory
 from config import (
     get_metadata_dir, get_video_metadata_path, get_audio_metadata_path,
     get_text_metadata_path, get_image_metadata_path, get_memory_log_path,
@@ -372,6 +374,16 @@ def should_retry_failed_file(file_path, max_attempts=3, failed_file="failed_file
     attempts = failed_files[abs_path].get("attempts", 0)
     return attempts < max_attempts
 
+def load_metadata(filename):
+        """Load metadata from JSON file, return empty dict if file doesn't exist"""
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading {filename}: {e}")
+        return {}
+
 def batch_process_files(directory):
     """
     Process all supported files in a directory with memory monitoring and resume capability
@@ -428,78 +440,44 @@ def batch_process_files(directory):
     from videotagger import tag_video_smart_conflict_resolution
     from audioprocessor import cleanup_audio_processing
     from imageprocessor import cleanup_image_processing
-    # Enhanced memory management functions
-    def enhanced_cleanup_for_batch_processing(file_index, action_type, total_files):
-        """Enhanced cleanup function using modular processor-specific cleanup functions"""
-        memory_before = get_memory_usage()
-        
-        # Always cleanup after videos (they use the most memory)
-        # Cleanup every file for images/audio/text, every 3 files for videos
-        should_cleanup = (
-            action_type == "video" or  # Always cleanup after videos
-            file_index % 3 == 0 or     # Cleanup every 3 files for any type  
-            file_index % 10 == 0       # Periodic cleanup every 10 files
-        )
-        
-        if should_cleanup:
-            print(f"🧹 Performing {action_type}-specific cleanup after file #{file_index}...")
-            
-            # Use processor-specific cleanup functions
-            if action_type == "video":
-                # Video cleanup is handled within videotagger.py
-                pass
-            elif action_type == "audio":
-                cleanup_audio_processing()  # Call with no args for general cleanup
-            elif action_type == "image":
-                cleanup_image_processing()  # Call with no args for general cleanup
-            elif action_type == "text":
-                # Text cleanup is handled within textprocessor.py
-                pass
-            
-            # General framework cache cleanup
-            for _ in range(2):
-                gc.collect()
-            
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                    torch.mps.empty_cache()
-            except ImportError:
-                pass
-            
-            try:
-                import tensorflow as tf
-                tf.keras.backend.clear_session()
-            except ImportError:
-                pass
-        
-        memory_after = get_memory_usage()
-        memory_freed = memory_before - memory_after if should_cleanup else 0.0
-        
-        if memory_freed > 0:
-            print(f"  ✅ Batch cleanup freed {memory_freed:.1f} MB ({memory_before:.1f} → {memory_after:.1f} MB)")
-        
-        return memory_freed
-    
-
     from textprocessor import TextProcessor
     from imageprocessor import ImageProcessor
-    # Simple metadata loading function
-    def load_metadata(filename):
-        """Load metadata from JSON file, return empty dict if file doesn't exist"""
-        try:
-            if os.path.exists(filename):
-                with open(filename, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            print(f"⚠️ Error loading {filename}: {e}")
-        return {}
     from audioanalyzer import analyze_audio_with_openai
     
     text_processor = TextProcessor()
     image_processor = ImageProcessor()
+    
+    # Helper functions for file processing (defined after processors are created)
+    def determine_file_type(file):
+        """Determine the type of file based on its extension"""
+        if is_video_file(file):
+            return "video"
+        elif is_text_file(file):
+            return "text"
+        elif is_audio_file(file):
+            return "audio"
+        elif is_image_file(file):
+            return "image"
+        else:
+            return "unknown"
+
+    def process_file_by_type(file_type, file_path):
+        """Process a file based on its determined type"""
+        if file_type == "video":
+            tag_video_smart_conflict_resolution(file_path, use_moondream_api=True)
+            return "video"
+        elif file_type == "text":
+            text_processor.process_file(file_path)
+            return "text"
+        elif file_type == "audio":
+            result = analyze_audio_with_openai(file_path)
+            print(json.dumps(result, indent=2))
+            return "audio"
+        elif file_type == "image":
+            image_processor.process_file(file_path)
+            return "image"
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
     
     # Load all metadata upfront - JSON files are small, so this is efficient
     video_metadata = load_metadata("video_metadata.json")
@@ -572,24 +550,9 @@ def batch_process_files(directory):
             memory_before = get_memory_usage()
             
             try:
-                action_type = "unknown"
-                if is_video_file(file):
-                    tag_video_smart_conflict_resolution(file_path, use_moondream_api=True)
-                    action_type = "video"
-                    stats["videos"] += 1
-                elif is_text_file(file):
-                    text_processor.process_file(file_path)
-                    action_type = "text"
-                    stats["text"] += 1
-                elif is_audio_file(file):
-                    result = analyze_audio_with_openai(file_path)
-                    print(json.dumps(result, indent=2))
-                    action_type = "audio"
-                    stats["audio"] += 1
-                elif is_image_file(file):
-                    image_processor.process_file(file_path)
-                    action_type = "image"
-                    stats["images"] += 1
+                file_type = determine_file_type(file)
+                action_type = process_file_by_type(file_type, file_path)
+                stats[action_type + "s"] += 1  # Add 's' to match stats dict keys (videos, images, etc.)
                 
                 print(f"✅ Successfully processed: {file_path}")
                 stats["processed"] += 1
@@ -617,16 +580,8 @@ def batch_process_files(directory):
                 error_msg = f"Failed to process {file_path}: {e}"
                 print(f"⚠️ {error_msg}")
                 
-                # Determine action type for failed files
-                failed_action_type = "unknown"
-                if is_video_file(file):
-                    failed_action_type = "video"
-                elif is_text_file(file):
-                    failed_action_type = "text"
-                elif is_audio_file(file):
-                    failed_action_type = "audio"
-                elif is_image_file(file):
-                    failed_action_type = "image"
+                # Use helper function to determine action type for failed files
+                failed_action_type = determine_file_type(file)
                 
                 # Log memory usage even for failed files
                 current_memory = log_memory_usage(file_path, memory_before, file_index + 1, total_files, failed_action_type, "failed", error_msg)
@@ -712,6 +667,61 @@ def batch_process_files(directory):
     else:
         print(f"⚠️  Memory growth: {total_memory_change:.1f} MB")
         print(f"💡 Models remain loaded for future processing")
+
+# Enhanced memory management function
+def enhanced_cleanup_for_batch_processing(file_index, action_type, total_files):
+    """Enhanced cleanup function using modular processor-specific cleanup functions"""
+    memory_before = get_memory_usage()
+    
+    # Always cleanup after videos (they use the most memory)
+    # Cleanup every file for images/audio/text, every 3 files for videos
+    should_cleanup = (
+        action_type == "video" or  # Always cleanup after videos
+        file_index % 3 == 0 or     # Cleanup every 3 files for any type  
+        file_index % 10 == 0       # Periodic cleanup every 10 files
+    )
+    
+    if should_cleanup:
+        print(f"🧹 Performing {action_type}-specific cleanup after file #{file_index}...")
+        
+        # Use processor-specific cleanup functions
+        if action_type == "video":
+            # Video cleanup is handled within videotagger.py
+            pass
+        elif action_type == "audio":
+            cleanup_audio_processing()  # Call with no args for general cleanup
+        elif action_type == "image":
+            cleanup_image_processing()  # Call with no args for general cleanup
+        elif action_type == "text":
+            # Text cleanup is handled within textprocessor.py
+            pass
+        
+        # General framework cache cleanup
+        for _ in range(2):
+            gc.collect()
+        
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except ImportError:
+            pass
+        
+        try:
+            import tensorflow as tf
+            tf.keras.backend.clear_session()
+        except ImportError:
+            pass
+    
+    memory_after = get_memory_usage()
+    memory_freed = memory_before - memory_after if should_cleanup else 0.0
+    
+    if memory_freed > 0:
+        print(f"  ✅ Batch cleanup freed {memory_freed:.1f} MB ({memory_before:.1f} → {memory_after:.1f} MB)")
+    
+    return memory_freed
 
 if __name__ == "__main__":
     # Handle special commands BEFORE importing heavy modules

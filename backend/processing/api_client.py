@@ -9,7 +9,7 @@ import requests
 import base64
 import json
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from PIL import Image
 import io
 import logging
@@ -92,34 +92,35 @@ class ContentCacheAPIClient:
         
         return self._make_request('POST', '/api/openai/vision-frame-analysis', json=payload)
     
-    def openai_video_summary(self, frame_captions: List[str], transcript_segments: Any, 
-                           video_metadata: Dict[str, Any], vision_analysis: Optional[str] = None,
-                           text_data: Optional[Dict[str, Any]] = None, 
-                           processed_location: Optional[str] = None) -> Dict[str, Any]:
+    def openai_video_summary(self, frame_captions: List[str], audio_summary: Any,
+                            video_metadata: Dict[str, Any], vision_analysis: Optional[str] = None,
+                            text_data: Optional[Dict[str, Any]] = None, 
+                            processed_location: Optional[Union[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
-        Generate comprehensive video summary using GPT-4o with built-in prompt via API server.
+        Generate comprehensive video summary using GPT-4o with built-in prompt and function calling.
         
         Args:
-            frame_captions: List of frame captions from BLIP
-            transcript_segments: Audio transcript segments
+            frame_captions: List of frame captions 
+            audio_summary: Summarized audio analysis result
             video_metadata: Video metadata from ffprobe
             vision_analysis: Optional enhanced vision analysis
             text_data: Optional OCR text data
             processed_location: Optional pre-processed location info
             
         Returns:
-            Dict with 'result' and 'usage' keys
+            Dict containing the structured video analysis result
         """
         payload = {
             "frame_captions": frame_captions,
-            "transcript_segments": transcript_segments,
+            "audio_summary": audio_summary,
             "video_metadata": video_metadata,
             "vision_analysis": vision_analysis,
             "text_data": text_data,
             "processed_location": processed_location
         }
         
-        return self._make_request('POST', '/api/openai/video-summary', json=payload)
+        response = self._make_request("POST", "/api/openai/video-summary", json=payload)
+        return response
     
     def openai_transcribe_audio(self, audio_data: bytes, file_format: str = "mp3") -> Dict[str, Any]:
         """
@@ -186,17 +187,18 @@ class ContentCacheAPIClient:
         
         return self._make_request('POST', '/api/openai/image-analysis', json=payload)
     
-    def openai_image_summary(self, caption: str, objects: List[str],
-                           text_data: Optional[Dict[str, Any]] = None,
-                           processed_location: Optional[str] = None) -> Dict[str, Any]:
+    def openai_image_summary(self, caption: str, objects: List[str], filename: str,
+                           coordinates: Optional[Dict[str, float]] = None,
+                           included_description: Optional[str] = None) -> Dict[str, Any]:
         """
-        Generate image summary using GPT-4o with built-in prompt via API server.
+        Generate comprehensive image summary using GPT-4o with built-in prompt via API server.
         
         Args:
-            caption: Image caption
-            objects: List of detected objects
-            text_data: Optional OCR text data
-            processed_location: Optional location information
+            caption: Image caption from Moondream
+            objects: List of detected objects from Moondream
+            filename: Image filename
+            coordinates: Optional GPS coordinates dict with latitude/longitude
+            included_description: Optional description from image metadata
             
         Returns:
             Dict with 'result' and 'usage' keys
@@ -204,8 +206,9 @@ class ContentCacheAPIClient:
         payload = {
             "caption": caption,
             "objects": objects,
-            "text_data": text_data,
-            "processed_location": processed_location
+            "filename": filename,
+            "coordinates": coordinates,
+            "included_description": included_description
         }
         
         return self._make_request('POST', '/api/openai/image-summary', json=payload)
@@ -247,6 +250,19 @@ class ContentCacheAPIClient:
     # ============================================================================
     # MOONDREAM METHODS
     # ============================================================================
+    
+    def moondream_analysis(self, image_base64: str) -> Dict[str, Any]:
+        """
+        Analyze image with Moondream to get caption and prominent objects.
+        
+        Args:
+            image_base64: Base64 encoded image
+            
+        Returns:
+            Dict containing caption and objects list
+        """
+        payload = {"image_base64": image_base64}
+        return self._make_request("POST", "/api/moondream/analysis", json=payload)
     
     def moondream_caption(self, image_path: str, prompt: str = "Describe this image in detail.") -> Dict[str, Any]:
         """
@@ -373,6 +389,11 @@ def use_api_server(base_url: str = None):
         base_url: API server URL. If None, uses environment variable or localhost.
     """
     global _api_client
+    
+    # Use environment variable or default if base_url is None
+    if base_url is None:
+        base_url = os.getenv("CONTENTCACHE_API_URL", "https://contentcache-production.up.railway.app")
+    
     _api_client = ContentCacheAPIClient(base_url)
     logger.info(f"ContentCache configured to use API server at: {_api_client.base_url}")
 
@@ -385,10 +406,10 @@ def call_gpt4o_vision_frame_analysis(image_paths: List[str], **kwargs):
     """Convenience function for GPT-4o vision frame analysis with built-in prompt."""
     return get_api_client().openai_vision_frame_analysis(image_paths, **kwargs)
 
-def call_gpt4o_video_summary(frame_captions: List[str], transcript_segments: Any, 
+def call_gpt4o_video_summary(frame_captions: List[str], audio_summary: Any, 
                            video_metadata: Dict[str, Any], **kwargs):
     """Convenience function for GPT-4o video summary with built-in prompt."""
-    return get_api_client().openai_video_summary(frame_captions, transcript_segments, video_metadata, **kwargs)
+    return get_api_client().openai_video_summary(frame_captions, audio_summary, video_metadata, **kwargs)
 
 def call_moondream_api(image_path: str, **kwargs):
     """Convenience function for Moondream - mirrors original usage."""
@@ -406,9 +427,9 @@ def call_gpt4o_image_analysis(image_path: str, **kwargs):
     """Convenience function for GPT-4o image analysis with built-in prompt."""
     return get_api_client().openai_image_analysis(image_path, **kwargs)
 
-def call_gpt4o_image_summary(caption: str, objects: List[str], **kwargs):
+def call_gpt4o_image_summary(caption: str, objects: List[str], filename: str, **kwargs):
     """Convenience function for GPT-4o image summary with built-in prompt."""
-    return get_api_client().openai_image_summary(caption, objects, **kwargs)
+    return get_api_client().openai_image_summary(caption, objects, filename, **kwargs)
 
 def call_gpt4o_text_analysis(file_path: str, text_content: str, **kwargs):
     """Convenience function for GPT-4o text analysis with built-in prompt."""

@@ -96,7 +96,7 @@ class VisionFrameAnalysisRequest(BaseModel):
 
 class VideoSummaryRequest(BaseModel):
     frame_captions: List[str]
-    transcript_segments: Any
+    audio_summary: Any
     video_metadata: Dict[str, Any]
     vision_analysis: Optional[str] = None
     text_data: Optional[Dict[str, Any]] = None
@@ -127,8 +127,9 @@ class ImageAnalysisRequest(BaseModel):
 class ImageSummaryRequest(BaseModel):
     caption: str
     objects: List[str]
-    text_data: Optional[Dict[str, Any]] = None
-    processed_location: Optional[Union[str, Dict[str, Any]]] = None
+    filename: str
+    coordinates: Optional[Dict[str, float]] = None  # {latitude, longitude}
+    included_description: Optional[str] = None
 
 class TextAnalysisRequest(BaseModel):
     file_path: str
@@ -139,6 +140,9 @@ class GoogleForwardGeocodeRequest(BaseModel):
 
 class SearchQueryParseRequest(BaseModel):
     query: str
+
+class MoondreamAnalysisRequest(BaseModel):
+    image_base64: str
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -273,7 +277,7 @@ async def openai_video_summary(request: VideoSummaryRequest):
         # Build the content string with all available information
         content_parts = [
             f"Frame Captions (BLIP Analysis): {request.frame_captions}",
-            f"Transcript Segments: {request.transcript_segments}",
+            f"Audio Summary: {request.audio_summary}",
             f"Full Metadata JSON: {json.dumps(request.video_metadata)}"
         ]
         
@@ -304,13 +308,13 @@ async def openai_video_summary(request: VideoSummaryRequest):
         # Built-in system message and user instruction
         system_message = "You are a helpful assistant that analyzes videos"
         user_instruction = (
-            "You will be given frame captions from BLIP analysis, transcript segments, and the full metadata JSON from ffprobe for a video file. "
+            "You will be given frame captions from BLIP analysis, audio summary, and the full metadata JSON from ffprobe for a video file. "
             + ("You may also receive enhanced vision analysis from GPT-4o mini vision API. " if request.vision_analysis else "")
             + ("You may also receive prominent text extracted from video frames using OCR. " if request.text_data and request.text_data.get('prominent_text') else "")
             + ("Location information has been pre-processed from GPS coordinates if available. " if request.processed_location else "")
             + "Extract and return the following if present: any included description or comment, creation date, and modification date. "
             + "IMPORTANT: Convert any dates to UTC ISO format (YYYY-MM-DDTHH:MM:SS.000000Z) for consistent searching. "
-            + "Then, using all the provided information (metadata, frame captions, transcript"
+            + "Then, using all the provided information (metadata, frame captions, audio summary"
             + (", vision analysis" if request.vision_analysis else "")
             + (", extracted text" if request.text_data and request.text_data.get('prominent_text') else "")
             + (", and pre-processed location" if request.processed_location else "")
@@ -323,7 +327,7 @@ async def openai_video_summary(request: VideoSummaryRequest):
         # Function definition for structured output (moved from videotagger.py)
         function_def = {
             "name": "tag_video_metadata",
-            "description": "Returns summary and keyword tags about a video based on frames, transcript, and existing metadata.",
+            "description": "Returns summary and keyword tags about a video based on frames, audio summary, and existing metadata.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -367,7 +371,7 @@ async def openai_video_summary(request: VideoSummaryRequest):
                             "people": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "People in the video (such as friends, family, crowd, specific names mentioned in either the transcript or the metadata, etc.)"
+                                "description": "People in the video (such as friends, family, crowd, specific names mentioned in either the audio summary or the metadata, etc.)"
                             }
                         },
                         "required": ["mood", "locations", "context", "objects", "video_style", "actions", "people"]
@@ -381,7 +385,7 @@ async def openai_video_summary(request: VideoSummaryRequest):
                             },
                             "location": {
                                 "type": "string",
-                                "description": "Location where the video was recorded (pre-processed from metadata), 'None' if not available"
+                                "description": "Coordinates where the video was recorded (pre-processed from metadata), 'None' if not available"
                             },
                             "included_description": {
                                 "type": "string",
@@ -608,74 +612,137 @@ async def openai_image_analysis(request: ImageAnalysisRequest):
 
 @app.post("/api/openai/image-summary")
 async def openai_image_summary(request: ImageSummaryRequest):
-    """Generate image summary using GPT-4o with built-in prompt and function calling."""
+    """Generate comprehensive image summary using GPT-4o with built-in prompt and function calling."""
     try:
-        # Built-in prompt for image summarization
-        prompt = (
-            "Given the following image caption and detected objects, "
-            "provide a concise summary of the image and a list of objects in the image.\n\n"
-            f"Caption: {request.caption}\nObjects: {request.objects}\n"
+        # Build the content string with all available information
+        content_parts = [
+            f"Image Caption: {request.caption}",
+            f"Detected Objects: {', '.join(request.objects)}",
+            f"Filename: {request.filename}"
+        ]
+        
+        # Add coordinates if available
+        if request.coordinates:
+            lat, lon = request.coordinates.get('latitude'), request.coordinates.get('longitude')
+            if lat is not None and lon is not None:
+                content_parts.append(f"GPS Coordinates: {lat}, {lon}")
+        
+        # Add included description if available
+        if request.included_description:
+            content_parts.append(f"Included Description: {request.included_description}")
+        
+        # Built-in system message and user instruction
+        system_message = "You are a helpful assistant that analyzes images and provides structured metadata"
+        user_instruction = (
+            "You will be given an image caption, detected objects, filename, and potentially GPS coordinates and description. "
+            + ("Location information from GPS coordinates should be incorporated into your analysis. " if request.coordinates else "")
+            + ("The included description provides additional context about the image. " if request.included_description else "")
+            + "Extract and return the following if present: creation date from filename (if detectable), and location. "
+            + "IMPORTANT: Convert any dates to UTC ISO format (YYYY-MM-DDTHH:MM:SS.000000Z) for consistent searching. "
+            + "Then, using all the provided information, return a comprehensive summary, tags, and metadata. "
+            + "IMPORTANT: If GPS coordinates are provided, give them extra weight in determining the location. "
+            + "If an included description is provided, use it to enhance and validate your analysis. "
         )
         
-        # Add OCR text information if available
-        if request.text_data and request.text_data.get('prominent_text'):
-            prominent_text = ', '.join(request.text_data['prominent_text'])
-            prompt += f"Detected Text (OCR): {prominent_text}\n"
-            prompt += "Please incorporate any relevant text information into your summary.\n\n"
-        
-        # Add location information if available (handle both old string format and new dict format)
-        if request.processed_location and request.processed_location != 'None':
-            if isinstance(request.processed_location, dict):
-                if request.processed_location.get('type') == 'coordinates':
-                    lat, lon = request.processed_location['latitude'], request.processed_location['longitude']
-                    prompt += f"Location: GPS coordinates {lat}, {lon}\n"
-                elif request.processed_location.get('type') == 'text':
-                    prompt += f"Location: {request.processed_location['location_text']}\n"
-            else:
-                # Legacy string format
-                prompt += f"Location: {request.processed_location}\n"
-            prompt += "Please incorporate this location information into your summary where relevant.\n\n"
-        
-        # Built-in function schema
+        # Function definition for structured output
         function_def = {
-            "name": "summarize_image",
-            "description": "Summarize image and extract objects.",
+            "name": "tag_image_metadata",
+            "description": "Returns summary and keyword tags about an image based on caption, objects, and metadata.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "summary": {
+                    "image_summary": {
                         "type": "string",
-                        "description": "A concise summary of the image."
+                        "description": "A 2 sentence summary of the image"
                     },
-                    "objects": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "A list of objects detected in the image."
+                    "tags": {
+                        "type": "object",
+                        "properties": {
+                            "mood": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Keywords describing the mood or atmosphere"
+                            },
+                            "locations": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Types of locations or settings shown"
+                            },
+                            "context": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "What kind of content or scene this is"
+                            },
+                            "objects": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Notable objects in the image"
+                            },
+                            "style": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Visual style or photography type (e.g., portrait, landscape, macro, street photography)"
+                            },
+                            "activities": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Activities or actions depicted in the image"
+                            },
+                            "people": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "People in the image (such as friends, family, crowd, specific names if mentioned)"
+                            }
+                        },
+                        "required": ["mood", "locations", "context", "objects", "style", "activities", "people"]
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "properties": {
+                            "date_taken": {
+                                "type": "string",
+                                "description": "Date when the image was taken (if detectable from filename or metadata) in UTC ISO format, 'None' if not available"
+                            },
+                            "location": {
+                                "type": "string",
+                                "description": "Location where the image was taken (from GPS coordinates or context), 'None' if not available"
+                            },
+                            "included_description": {
+                                "type": "string",
+                                "description": "Description provided in the image metadata (if available), 'None' if not"
+                            }
+                        }
                     }
                 },
-                "required": ["summary", "objects"]
+                "required": ["image_summary", "tags", "metadata"]
             }
         }
         
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_instruction},
+                {"role": "user", "content": "\n\n".join(content_parts)}
             ],
-            tools=[{"type": "function", "function": function_def}],
-            tool_choice={"type": "function", "function": {"name": "summarize_image"}},
-            max_tokens=400
+            tools=[
+                {"type": "function", "function": function_def}
+            ],
+            tool_choice="auto"
         )
         
         # Extract the structured JSON output from API response
         if response.choices[0].message.tool_calls:
-            function_args = response.choices[0].message.tool_calls[0].function.arguments
             return {
-                "result": function_args,
+                "result": response.choices[0].message.tool_calls[0].function.arguments,
                 "usage": response.usage.model_dump() if response.usage else None
             }
         else:
-            raise HTTPException(status_code=500, detail="No tool call found in OpenAI response")
+            # Fallback if no tool call was made
+            return {
+                "result": response.choices[0].message.content,
+                "usage": response.usage.model_dump() if response.usage else None
+            }
             
     except Exception as e:
         logger.error(f"OpenAI Image Summary error: {e}")
@@ -865,6 +932,45 @@ Be precise with location names for geocoding accuracy."""
 # ============================================================================
 # MOONDREAM ENDPOINTS
 # ============================================================================
+
+@app.post("/api/moondream/analysis")
+async def moondream_analysis(request: MoondreamAnalysisRequest):
+    """Generate caption and extract prominent objects using Moondream API."""
+    try:
+        moondream_api_key = os.getenv("MOONDREAM_API_KEY")
+        if not moondream_api_key:
+            raise HTTPException(status_code=500, detail="MOONDREAM_API_KEY not configured")
+        
+        # Initialize Moondream SDK
+        import moondream as md
+        model = md.vl(api_key=moondream_api_key)
+        
+        # Decode base64 image
+        image = decode_base64_to_image(request.image_base64)
+        
+        # Generate caption
+        caption_result = model.caption(image, length="normal")
+        caption = caption_result.get("caption", "")
+        
+        # Extract prominent objects using a targeted query
+        objects_result = model.query(image, "What are the most prominent objects, people, or items visible in this image? List them as a comma-separated list.")
+        objects_text = objects_result.get("answer", "")
+        
+        # Parse objects from the response (split by commas and clean up)
+        objects = []
+        if objects_text:
+            objects = [obj.strip() for obj in objects_text.split(',') if obj.strip()]
+        
+        return {
+            "caption": caption,
+            "objects": objects,
+            "raw_objects_response": objects_text
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Moondream SDK not installed")
+    except Exception as e:
+        logger.error(f"Moondream Analysis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/moondream/caption")
 async def moondream_caption(request: MoondreamRequest):

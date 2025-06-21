@@ -9,7 +9,9 @@ import warnings
 import yaml
 import signal
 from functools import wraps
-from config import get_models_cache_dir
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from backend.processing.config import get_models_cache_dir
 
 # Suppress various warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, module="whisper")
@@ -210,7 +212,7 @@ def with_timeout(timeout_seconds):
         return wrapper
     return decorator
 
-def safe_transcribe(model, file_path, use_timeout=True):
+def safe_transcribe(model, file_path, use_timeout=False):
     """Safely transcribe audio with optional timeout"""
     if use_timeout:
         try:
@@ -466,5 +468,3 @@ def cleanup_audio_processing(result=None, segments_out=None, filename_info=None,
             gc.collect()
         cleanup_temp_files()
         return 0.0
-
-# print(transcribe_audio('day7.mp4'))

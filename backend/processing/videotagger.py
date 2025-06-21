@@ -1,15 +1,26 @@
-import framesegmentation
-import framestagging
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from framesegmentation import split_frames
+from config import cleanup_temp_frames
+from framestagging import (
+    analyze_keyframes_with_gpt4o_vision, 
+    process_frames_with_moondream_api,
+    calculate_keyframes_to_send,
+    select_representative_keyframes
+)
 import audioprocessor
-import audioanalyzer
+from location_utils import process_location_from_metadata
+from config import get_video_metadata_path, get_temp_frames_dir
+from api_client import get_api_client
+import api_client
 from dotenv import load_dotenv
 import openai
-import os
 import json
 import shutil
 import subprocess
 from datetime import datetime
-import sys
 import psutil
 import base64
 import math
@@ -19,16 +30,11 @@ from PIL import Image
 import numpy as np
 import warnings
 import gc
-from location_utils import process_location_from_metadata
 import threading
 import concurrent.futures
-import numpy as np
 from sentence_transformers import util
 import time
 import torch
-import framestagging
-from config import get_video_metadata_path, get_temp_frames_dir
-import api_client
 
 # Suppress various warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
@@ -210,12 +216,12 @@ def extract_and_store_location_coordinates(video_metadata):
     
     return None
 
-def call_gpt4o(frame_captions, transcript_segments, video_metadata, vision_analysis=None, text_data=None, processed_location=None):
+def call_gpt4o(frame_captions, audio_summary, video_metadata, vision_analysis=None, text_data=None, processed_location=None):
     # Use API server for video summary with built-in prompts
     try:
         response_data = api_client.get_api_client().openai_video_summary(
             frame_captions=frame_captions,
-            transcript_segments=transcript_segments,
+            audio_summary=audio_summary,
             video_metadata=video_metadata,
             vision_analysis=vision_analysis,
             text_data=text_data,
@@ -275,12 +281,11 @@ def extract_prominent_text_from_frames(selected_frames):
         selected_frames (list): Paths to selected keyframe images
         
     Returns:
-        dict: Extracted text information from all frames
+        dict: Extracted prominent text information from all frames
     """
     print(f"📖 Extracting text from {len(selected_frames)} keyframes...")
     
     all_prominent_text = []
-    all_text_elements = []
     frame_text_data = {}
     
     for i, frame_path in enumerate(selected_frames):
@@ -295,7 +300,6 @@ def extract_prominent_text_from_frames(selected_frames):
             
             frame_text = {
                 'prominent_text': [],
-                'all_text': [],
                 'method': 'none'
             }
             
@@ -305,37 +309,30 @@ def extract_prominent_text_from_frames(selected_frames):
                     results = easyocr_reader.readtext(image_np)
                     
                     frame_prominent = []
-                    frame_all = []
                     
                     for (bbox, text, confidence) in results:
-                        if confidence > 0.3:  # Filter low confidence
+                        if confidence > 0.6:  # Only high confidence text
                             text_clean = text.strip()
-                            if len(text_clean) > 2:  # Filter very short text
-                                frame_all.append(text_clean)
-                                
-                                # Consider "prominent" if high confidence and reasonable length
-                                if confidence > 0.6 and len(text_clean) > 3:
+                            if len(text_clean) > 2:  # Only reasonably long text
                                     frame_prominent.append(text_clean)
                     
                     frame_text.update({
                         'prominent_text': frame_prominent,
-                        'all_text': frame_all,
                         'method': 'easyocr'
                     })
                     
-                    # Add to overall collections
+                    # Add to overall collection
                     all_prominent_text.extend(frame_prominent)
-                    all_text_elements.extend(frame_all)
                     
-                    if frame_all:
-                        debug_print(f"    📖 {frame_name}: Found {len(frame_all)} text elements ({len(frame_prominent)} prominent)")
+                    if frame_prominent:
+                        debug_print(f"    📖 {frame_name}: Found {len(frame_prominent)} prominent text elements")
                     
                 except Exception as e:
                     debug_print(f"    ⚠️ EasyOCR failed for {frame_name}: {e}")
             
             # If EasyOCR failed to extract any text, log it for debugging
-            if not frame_text['all_text']:
-                debug_print(f"    ℹ️ No text found in {frame_name}")
+            if not frame_text['prominent_text']:
+                debug_print(f"    ℹ️ No prominent text found in {frame_name}")
             
             frame_text_data[frame_name] = frame_text
             
@@ -344,25 +341,19 @@ def extract_prominent_text_from_frames(selected_frames):
     
     # Remove duplicates while preserving order
     unique_prominent = []
-    unique_all = []
     
     for text in all_prominent_text:
         if text not in unique_prominent:
             unique_prominent.append(text)
     
-    for text in all_text_elements:
-        if text not in unique_all:
-            unique_all.append(text)
-    
     result = {
         'prominent_text': unique_prominent,
-        'all_text': unique_all,
         'frame_details': frame_text_data,
         'total_frames_processed': len(selected_frames),
-        'frames_with_text': len([f for f in frame_text_data.values() if f['all_text']])
+        'frames_with_text': len([f for f in frame_text_data.values() if f['prominent_text']])
     }
     
-    print(f"✅ Text extraction complete: {len(unique_all)} unique text elements, {len(unique_prominent)} prominent")
+    print(f"✅ Text extraction complete: {len(unique_prominent)} prominent text elements")
     return result
 
 def save_video_metadata(vid_path, metadata, output_file=None, processed_location=None):
@@ -405,7 +396,7 @@ def save_video_metadata(vid_path, metadata, output_file=None, processed_location
 # ENHANCED VISUAL ANALYSIS WITH GPT-4O MINI VISION API
 # ============================================================================
 
-def encode_image_to_base64(image_path, resize=True, max_dimension=512, quality=50, show_preview=False):
+def encode_image_to_base64(image_path, resize=True, max_dimension=512, quality=50):
     """
     Encode image to base64 for OpenAI API with compression to reduce token costs.
     
@@ -448,19 +439,6 @@ def encode_image_to_base64(image_path, resize=True, max_dimension=512, quality=5
                 resize_info = f" resized from {original_dimensions} to {img.size}"
             else:
                 resize_info = f" kept at {img.size}"
-            
-            # Show preview if requested (temporary feature)
-            if show_preview:
-                try:
-                    # Create a copy for display
-                    display_img = img.copy()
-                    # Resize for display if too large
-                    display_img.thumbnail((400, 400), Image.Resampling.LANCZOS)
-                    display_img.show(title=f"Frame being sent to API: {os.path.basename(image_path)}")
-                    print(f"    👁️  Displaying preview of {os.path.basename(image_path)}")
-                except Exception as e:
-                    print(f"    ⚠️  Could not display preview: {e}")
-            
             # Compress to JPEG in memory with optimization
             buffer = io.BytesIO()
             img.save(buffer, format='JPEG', quality=quality, optimize=True)
@@ -616,8 +594,6 @@ def cleanup_all_models():
     except Exception as e:
         print(f"⚠️ Error cleaning up EasyOCR models: {e}")
     
-    # Multiple rounds of garbage collection
-    for _ in range(3):
         gc.collect()
     
     # Clear all ML framework caches
@@ -787,7 +763,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     
     # Step 1: Extract frames
     print("Step 1: Extracting frames...")
-    frames_dir, frame_metadata = framesegmentation.split_frames(vid_path)
+    frames_dir, frame_metadata = split_frames(vid_path)
     
     # Validate frame extraction was successful
     if frames_dir is None or not os.path.exists(frames_dir):
@@ -811,8 +787,8 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     # Step 2: Select keyframes for processing
     print("Step 2: Selecting keyframes...")
     total_keyframes = len(frame_files)
-    num_to_send = framestagging.calculate_keyframes_to_send(total_keyframes)
-    selected_frames = framestagging.select_representative_keyframes(frames_dir, num_to_send)
+    num_to_send = calculate_keyframes_to_send(total_keyframes)
+    selected_frames = select_representative_keyframes(frames_dir, num_to_send)
     print(f"✓ Selected {len(selected_frames)} keyframes from {total_keyframes} total frames")
     
     # Step 3: Extract video metadata (quick operation, run synchronously)
@@ -834,7 +810,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
             return text_data
         except Exception as e:
             print(f"❌ [OCR Thread] Error: {e}")
-            return {'prominent_text': [], 'all_text': [], 'frame_details': {}}
+            return {'prominent_text': [], 'frame_details': {}}
     
     def process_gpt4o_vision():
         """Analyze keyframes with GPT-4o vision via API server"""
@@ -855,7 +831,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
             print(f"⚠️ [GPT-4o Thread] API server failed, falling back to direct call: {e}")
             # Fallback to original framestagging function
             try:
-                vision_analysis = framestagging.analyze_keyframes_with_gpt4o_vision(selected_frames)
+                vision_analysis = analyze_keyframes_with_gpt4o_vision(selected_frames)
                 print(f"✅ [GPT-4o Thread] Fallback vision analysis complete")
                 return vision_analysis
             except Exception as fallback_error:
@@ -894,7 +870,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
             # Fallback to original framestagging function
             try:
                 if use_moondream_api:
-                    frame_captions = framestagging.process_frames_with_moondream_api(frames_dir, vid_path)
+                    frame_captions = process_frames_with_moondream_api(frames_dir, vid_path)
                     print(f"✅ [Moondream Thread] Fallback processing complete: {len(frame_captions)} frames")
                     return frame_captions
                 else:
@@ -904,15 +880,14 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
                 return []
     
     def process_audio():
-        """Extract audio transcript via API server (with fallback to local processing)"""
+        """Extract and analyze audio using OpenAI via API server"""
         try:
-            print("🎵 [Audio Thread] Starting transcript extraction...")
-            # For now, keep using local audio processing as it's more complex
-            # and involves local file extraction. API server transcription would
-            # require sending large audio files over the network.
-            transcript = audioprocessor.process_audio(vid_path)
-            print(f"✅ [Audio Thread] Transcript extraction complete")
-            return transcript
+            print("🎵 [Audio Thread] Starting audio analysis...")
+            # Use analyze_audio_with_openai which handles video files and returns summarized analysis
+            from audioanalyzer import analyze_audio_with_openai
+            audio_summary = analyze_audio_with_openai(vid_path)
+            print(f"✅ [Audio Thread] Audio analysis complete")
+            return audio_summary
         except Exception as e:
             print(f"❌ [Audio Thread] Error: {e}")
             return None
@@ -937,7 +912,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         text_data = None
         vision_analysis = None
         frame_captions = None
-        transcript = None
+        audio_summary = None
         
         # Use as_completed to show progress
         for future in concurrent.futures.as_completed(futures.values()):
@@ -956,18 +931,18 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
                         elif task_name == 'moondream':
                             frame_captions = result
                         elif task_name == 'audio':
-                            transcript = result
+                            audio_summary = result
                     except Exception as e:
                         print(f"❌ [{task_name.upper()}] Failed: {e}")
                         # Set default values for failed tasks
                         if task_name == 'ocr':
-                            text_data = {'prominent_text': [], 'all_text': [], 'frame_details': {}}
+                            text_data = {'prominent_text': [], 'frame_details': {}}
                         elif task_name == 'vision':
                             vision_analysis = None
                         elif task_name == 'moondream':
                             frame_captions = []
                         elif task_name == 'audio':
-                            transcript = None
+                            audio_summary = None
                     break
     
     concurrent_time = time.time() - start_time
@@ -1000,7 +975,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     print("\nStep 5: Final comprehensive analysis with GPT-4o...")
     # Call GPT-4o with all collected data
     # Note: frame_captions are not currently passed to call_gpt4o as it expects selected_frames for vision analysis
-    result = call_gpt4o(selected_frames, transcript, video_metadata, vision_analysis, text_data, processed_location)
+    result = call_gpt4o(selected_frames, audio_summary, video_metadata, vision_analysis, text_data, processed_location)
     
     parsed = json.loads(result)
     memory_after_gpt = get_memory_usage()
@@ -1022,7 +997,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         selected_frames=selected_frames,
         text_data=text_data,
         vision_analysis=vision_analysis,
-        transcript=transcript,
+        audio_summary=audio_summary,
         video_metadata=video_metadata,
         result=result,
         parsed=parsed,
@@ -1049,7 +1024,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     
     return result_copy
 
-def cleanup_video_processing(selected_frames=None, text_data=None, vision_analysis=None, transcript=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
+def cleanup_video_processing(selected_frames=None, text_data=None, vision_analysis=None, audio_summary=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
     """
     Cleanup function for video processing to prevent memory leaks.
     
@@ -1066,7 +1041,7 @@ def cleanup_video_processing(selected_frames=None, text_data=None, vision_analys
         'selected_frames': selected_frames,
         'text_data': text_data,
         'vision_analysis': vision_analysis,
-        'transcript': transcript,
+        'audio_summary': audio_summary,
         'video_metadata': video_metadata,
         'result': result,
         'parsed': parsed,

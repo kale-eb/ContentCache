@@ -5,6 +5,7 @@ Loads embeddings and metadata for all content types to provide fast semantic sea
 """
 
 import os
+import sys
 import json
 import pickle
 import time
@@ -15,9 +16,20 @@ import numpy as np
 from sentence_transformers import SentenceTransformer, util
 import logging
 from pathlib import Path
+
+# --- Add backend/processing to Python path ---
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'processing'))
+
+# Handle both standalone script and module import
+try:
+    from backend.processing.config import (get_models_cache_dir, get_embeddings_cache_dir, 
+                       get_video_metadata_path, get_text_metadata_path,
+                       get_image_metadata_path, get_audio_metadata_path)
+except ImportError:
 from config import (get_models_cache_dir, get_embeddings_cache_dir, 
                    get_video_metadata_path, get_text_metadata_path,
                    get_image_metadata_path, get_audio_metadata_path)
+
 import math
 import re
 
@@ -270,6 +282,9 @@ class ContentCacheSearchServer:
         
         # Parse the query using OpenAI to extract semantic components
         try:
+            try:
+                from backend.processing.api_client import get_api_client
+            except ImportError:
             from api_client import get_api_client
             client = get_api_client()
             parse_result = client.parse_search_query(query)
@@ -565,10 +580,10 @@ class LocationSearch:
     def forward_geocode(self, location_text: str) -> Optional[Tuple[float, float]]:
         """Convert location text to coordinates using Google Maps API"""
         try:
+            try:
+                from backend.processing.api_client import get_api_client
+            except ImportError:
             from api_client import get_api_client
-            
-            # Use Google Maps Geocoding API via our API server
-            # Note: We'll need to add a forward geocoding endpoint
             client = get_api_client()
             response = client.google_forward_geocode(location_text)
             
