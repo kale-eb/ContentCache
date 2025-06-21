@@ -933,7 +933,7 @@ Be precise with location names for geocoding accuracy."""
 # MOONDREAM ENDPOINTS
 # ============================================================================
 
-@app.post("/api/moondream/analysis")
+@app.post("/api/moondream/image-analysis")
 async def moondream_analysis(request: MoondreamAnalysisRequest):
     """Generate caption and extract prominent objects using Moondream API."""
     try:

@@ -26,9 +26,9 @@ try:
                        get_video_metadata_path, get_text_metadata_path,
                        get_image_metadata_path, get_audio_metadata_path)
 except ImportError:
-from config import (get_models_cache_dir, get_embeddings_cache_dir, 
-                   get_video_metadata_path, get_text_metadata_path,
-                   get_image_metadata_path, get_audio_metadata_path)
+    from config import (get_models_cache_dir, get_embeddings_cache_dir, 
+                    get_video_metadata_path, get_text_metadata_path,
+                    get_image_metadata_path, get_audio_metadata_path)
 
 import math
 import re
@@ -285,7 +285,7 @@ class ContentCacheSearchServer:
             try:
                 from backend.processing.api_client import get_api_client
             except ImportError:
-            from api_client import get_api_client
+                from api_client import get_api_client
             client = get_api_client()
             parse_result = client.parse_search_query(query)
             
@@ -583,7 +583,7 @@ class LocationSearch:
             try:
                 from backend.processing.api_client import get_api_client
             except ImportError:
-            from api_client import get_api_client
+                from api_client import get_api_client
             client = get_api_client()
             response = client.google_forward_geocode(location_text)
             

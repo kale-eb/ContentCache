@@ -101,7 +101,7 @@ def analyze_audio_with_openai(audio_path):
     This function works with both audio files and video files.
     """
     # Step 1: Process audio file to extract features, transcription, etc.
-        audio_metadata = analyze_audio_comprehensive(audio_path)
+    audio_metadata = analyze_audio_comprehensive(audio_path)
         
     if not audio_metadata:
         raise ValueError("Audio processing failed or returned no data.")
@@ -130,7 +130,7 @@ def analyze_audio_with_openai(audio_path):
         # Return the result from the API response
         if 'result' in response:
             return response['result']
-    else:
+        else:
             return response
         
     except Exception as e:

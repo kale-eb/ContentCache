@@ -256,15 +256,15 @@ def call_gpt4o(frame_captions, audio_summary, video_metadata, vision_analysis=No
 
 def remove_frames_dir(frames_dir):
     """Remove frames directory after processing is complete"""
-        try:
+    try:
         if os.path.exists(frames_dir):
             shutil.rmtree(frames_dir)
             print(f"🧹 Cleaned up frames directory: {frames_dir}")
         else:
             print(f"⚠️ Frames directory not found (may have been cleaned already): {frames_dir}")
-        except Exception as e:
+    except Exception as e:
         print(f"⚠️ Failed to remove frames directory {frames_dir}: {e}")
-        # For temp directories, this isn't critical - OS will clean up eventually
+    # For temp directories, this isn't critical - OS will clean up eventually
 
 def tag_video(vid_path):
     """

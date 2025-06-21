@@ -262,7 +262,7 @@ class ContentCacheAPIClient:
             Dict containing caption and objects list
         """
         payload = {"image_base64": image_base64}
-        return self._make_request("POST", "/api/moondream/analysis", json=payload)
+        return self._make_request("POST", "/api/moondream/image-analysis", json=payload)
     
     def moondream_caption(self, image_path: str, prompt: str = "Describe this image in detail.") -> Dict[str, Any]:
         """
