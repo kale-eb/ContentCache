@@ -106,7 +106,7 @@ def analyze_audio_with_openai(audio_path):
         audio_metadata = analyze_audio_comprehensive(audio_path)
     else:
         # It's an audio file, use direct processing
-        audio_metadata = process_audio(audio_path)
+    audio_metadata = process_audio(audio_path)
         
     if not audio_metadata:
         raise ValueError("Audio processing failed or returned no data.")
