@@ -24,11 +24,15 @@ def calculate_keyframe_interval(video_length):
     Calculate the interval between keyframes based on video length.
     Shorter videos get more frequent keyframes.
     """
-    if video_length <= 30:  # Very short videos (30 seconds or less)
+    if video_length <= 1:  # Ultra-short videos (1 second or less)
+        return 0.5  # Every 0.5 seconds
+    elif video_length <= 5:  # Very short videos (5 seconds or less)
+        return 1  # Every 1 second
+    elif video_length <= 30:  # Short videos (30 seconds or less)
         return 2  # Every 2 seconds
-    elif video_length <= 120:  # Short videos (2 minutes or less)
+    elif video_length <= 120:  # Medium videos (2 minutes or less)
         return 3  # Every 3 seconds
-    elif video_length <= 300:  # Medium videos (5 minutes or less)
+    elif video_length <= 300:  # Long videos (5 minutes or less)
         return 4  # Every 4 seconds
     elif video_length <= 600:  # Longer videos (10 minutes or less)
         return 5  # Every 5 seconds
@@ -162,7 +166,7 @@ def split_frames(vid_path, compress_frames=False, max_pixels=1000):
             reference_image = load_gray_image(current_path)
             comparison_image = load_gray_image(next_path)
 
-            if ssim(reference_image, comparison_image) > 0.8:
+            if ssim(reference_image, comparison_image) > 0.75:
                 duplicates.add(next_path)
             
             # Clean up images

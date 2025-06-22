@@ -1,0 +1,72 @@
+{
+  "name": "contentcache-desktop",
+  "version": "1.0.0",
+  "description": "ContentCache Desktop - AI-powered content processing and search application",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build-mac": "electron-builder --mac",
+    "build-win": "electron-builder --win",
+    "build-linux": "electron-builder --linux",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "keywords": [
+    "contentcache",
+    "ai",
+    "search",
+    "video",
+    "image",
+    "processing",
+    "electron",
+    "desktop"
+  ],
+  "author": "ContentCache Team",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "build": {
+    "appId": "com.contentcache.desktop",
+    "productName": "ContentCache",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "../backend/**/*",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/contentcache.git"
+  },
+  "homepage": "https://github.com/your-username/contentcache#readme"
+} 

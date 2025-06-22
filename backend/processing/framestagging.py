@@ -1,9 +1,6 @@
 import gc
 from pathlib import Path
 from PIL import Image
-# BLIP imports commented out - using Moondream API only
-# from transformers import BlipProcessor, BlipForConditionalGeneration, AutoTokenizer, BlipImageProcessor, AutoModelForCausalLM
-
 from sentence_transformers import SentenceTransformer, util
 import os
 import torch
@@ -46,21 +43,12 @@ os.environ['TRANSFORMERS_OFFLINE'] = '1'
 # Optimize torch settings for faster loading
 torch.set_num_threads(4)  # Limit CPU threads for faster startup
 
-# BLIP functionality commented out - using Moondream API only
-print("⚠️ BLIP functionality disabled - using Moondream API only")
-
-# Initialize placeholder variables for BLIP (commented out)
-processor = None
-model = None
-sentence_model = None
-image_processor = None
-tokenizer = None
-
-# Previously loaded BLIP models here - now using Moondream API only
-
 # Global variables for models (lazy loading)
 moondream_model = None
 moondream_device = None
+sentence_model = None
+
+labels_dict = {}
 
 def load_moondream_api():
     """Load Moondream API configuration."""
@@ -80,12 +68,6 @@ def load_moondream_api():
     
     print(f"✅ Moondream API key loaded successfully (length: {len(api_key)})")
     return api_key
-
-# Local model loading removed - using Moondream API only
-
-
-
-labels_dict = {}
 
 def encode_image_to_base64(image_path, resize=True, max_dimension=512, quality=50):
     """
@@ -240,10 +222,6 @@ def analyze_keyframes_with_gpt4o_vision(selected_frames):
         print(f"❌ Error in GPT-4o vision analysis: {e}")
         return None
 
-# Legacy functions removed - using Moondream API only
-
-
-
 def process_frames_with_moondream_api(frames_dir, vid_path):
     """
     Process frames using Moondream API (fast cloud inference).
@@ -328,7 +306,6 @@ def process_frames_with_moondream_api(frames_dir, vid_path):
         print(f"✓ Moondream API processed {len(frame_captions)} frames")
         return frame_captions
 
-
 def deduplicate_captions(captions, frame_paths, threshold=0.85):
     # Use the global model instance instead of creating a new one
     global sentence_model
@@ -373,7 +350,3 @@ def deduplicate_captions(captions, frame_paths, threshold=0.85):
             pass
     
     return kept
-
-# Legacy functions removed - current implementation uses:
-# 1. process_frames_with_moondream_api() for frame captioning  
-# 2. analyze_keyframes_with_gpt4o_vision() for vision analysis

@@ -438,14 +438,11 @@ def batch_process_files(directory):
     # Import heavy modules only when actually processing
     print("📦 Loading processing modules...")
     from videotagger import tag_video_smart_conflict_resolution
-    from audioprocessor import cleanup_audio_processing
-    from imageprocessor import cleanup_image_processing
-    from textprocessor import TextProcessor
-    from imageprocessor import ImageProcessor
+    from imageprocessor import tag_image
     from audioanalyzer import analyze_audio_with_openai
+    from textprocessor import TextProcessor
     
     text_processor = TextProcessor()
-    image_processor = ImageProcessor()
     
     # Helper functions for file processing (defined after processors are created)
     def determine_file_type(file):
@@ -474,16 +471,16 @@ def batch_process_files(directory):
             print(json.dumps(result, indent=2))
             return "audio"
         elif file_type == "image":
-            image_processor.process_file(file_path)
+            tag_image(file_path)
             return "image"
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
     
     # Load all metadata upfront - JSON files are small, so this is efficient
-    video_metadata = load_metadata("video_metadata.json")
-    audio_metadata = load_metadata("audio_metadata.json")
-    text_metadata = load_metadata("text_metadata.json")
-    image_metadata = load_metadata("image_metadata.json")
+    video_metadata = load_metadata(get_video_metadata_path())
+    audio_metadata = load_metadata(get_audio_metadata_path())
+    text_metadata = load_metadata(get_text_metadata_path())
+    image_metadata = load_metadata(get_image_metadata_path())
     
     # First pass: collect all files to process
     print("📝 Collecting files to process...")
@@ -552,7 +549,16 @@ def batch_process_files(directory):
             try:
                 file_type = determine_file_type(file)
                 action_type = process_file_by_type(file_type, file_path)
-                stats[action_type + "s"] += 1  # Add 's' to match stats dict keys (videos, images, etc.)
+                
+                # Update stats with correct plural forms
+                if action_type == "video":
+                    stats["videos"] += 1
+                elif action_type == "image":
+                    stats["images"] += 1
+                elif action_type == "audio":
+                    stats["audio"] += 1
+                elif action_type == "text":
+                    stats["text"] += 1
                 
                 print(f"✅ Successfully processed: {file_path}")
                 stats["processed"] += 1
@@ -599,11 +605,6 @@ def batch_process_files(directory):
                             
     # Final cleanup of processor instances
     del text_processor
-    del image_processor
-    del video_metadata
-    del audio_metadata 
-    del text_metadata
-    del image_metadata
     gc.collect()
     
     # Final memory cleanup and statistics
@@ -671,6 +672,7 @@ def batch_process_files(directory):
 # Enhanced memory management function
 def enhanced_cleanup_for_batch_processing(file_index, action_type, total_files):
     """Enhanced cleanup function using modular processor-specific cleanup functions"""
+    from audioprocessor import cleanup_audio_processing
     memory_before = get_memory_usage()
     
     # Always cleanup after videos (they use the most memory)
@@ -690,12 +692,8 @@ def enhanced_cleanup_for_batch_processing(file_index, action_type, total_files):
             pass
         elif action_type == "audio":
             cleanup_audio_processing()  # Call with no args for general cleanup
-        elif action_type == "image":
-            cleanup_image_processing()  # Call with no args for general cleanup
-        elif action_type == "text":
-            # Text cleanup is handled within textprocessor.py
-            pass
-        
+
+    
         # General framework cache cleanup
         for _ in range(2):
             gc.collect()

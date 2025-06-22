@@ -9,6 +9,8 @@ import sys
 import json
 import pickle
 import time
+import subprocess
+import signal
 from typing import Dict, List, Tuple, Any, Optional, Union
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -36,6 +38,43 @@ import re
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def kill_processes_on_port(port):
+    """Kill any existing processes running on the specified port."""
+    try:
+        print(f"🔍 Checking for existing processes on port {port}...")
+        
+        # Use lsof to find processes using the port
+        result = subprocess.run(['lsof', '-ti', f':{port}'], 
+                              capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            print(f"🔄 Found {len(pids)} process(es) on port {port}: {', '.join(pids)}")
+            
+            for pid in pids:
+                try:
+                    pid_int = int(pid.strip())
+                    print(f"🛑 Killing process {pid_int}...")
+                    os.kill(pid_int, signal.SIGTERM)
+                    print(f"✅ Killed process {pid_int}")
+                except (ValueError, ProcessLookupError, PermissionError) as e:
+                    print(f"⚠️ Could not kill process {pid}: {e}")
+            
+            # Wait a moment for processes to terminate
+            time.sleep(1)
+            print(f"✅ Port {port} cleanup completed")
+        else:
+            print(f"✅ No existing processes found on port {port}")
+            
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Timeout while checking port {port}")
+    except FileNotFoundError:
+        print(f"⚠️ lsof command not found, skipping port cleanup")
+    except Exception as e:
+        print(f"⚠️ Error during port cleanup: {e}")
+
 
 class ContentCacheSearchServer:
     def __init__(self, port=5001):
@@ -116,6 +155,12 @@ class ContentCacheSearchServer:
             return jsonify({
                 'status': 'running',
                 'model_loaded': self.sentence_model is not None,
+                'stats': {
+                    'video': len(self.content_metadata['video']),
+                    'text': len(self.content_metadata['text']),
+                    'audio': len(self.content_metadata['audio']),
+                    'image': len(self.content_metadata['image'])
+                },
                 'content_stats': {
                     'video': {
                         'metadata': len(self.content_metadata['video']),
@@ -342,9 +387,11 @@ class ContentCacheSearchServer:
                 ctype, file_path = type_path.split(':', 1)
                 
                 result = {
+                    'type': ctype,
                     'content_type': ctype,
                     'file_path': file_path,
                     'filename': os.path.basename(file_path),
+                    'score': round(similarity, 4),
                     'similarity_score': round(similarity, 4),
                     'search_type': 'semantic'
                 }
@@ -355,13 +402,19 @@ class ContentCacheSearchServer:
                     
                     # Add content-specific metadata
                     if ctype == 'video':
-                        result['summary'] = metadata.get('video_summary', '')[:200] + '...' if len(metadata.get('video_summary', '')) > 200 else metadata.get('video_summary', '')
+                        summary = metadata.get('video_summary', '')
+                        result['summary'] = summary[:200] + '...' if len(summary) > 200 else summary
+                        result['content'] = result['summary']
                         result['tags'] = metadata.get('tags', {})
                     elif ctype == 'text':
-                        result['summary'] = metadata.get('analysis', {}).get('summary', '')
+                        summary = metadata.get('analysis', {}).get('summary', '')
+                        result['summary'] = summary
+                        result['content'] = summary
                         result['file_type'] = metadata.get('file_type', '')
                     elif ctype in ['image', 'audio']:
-                        result['summary'] = metadata.get('analysis', '')[:200] + '...' if len(metadata.get('analysis', '')) > 200 else metadata.get('analysis', '')
+                        analysis = metadata.get('analysis', '')
+                        result['summary'] = analysis[:200] + '...' if len(analysis) > 200 else analysis
+                        result['content'] = result['summary']
                 
                 semantic_results.append(result)
         
@@ -508,6 +561,9 @@ class ContentCacheSearchServer:
         total_embeddings = sum(len(embeddings) for embeddings in self.content_embeddings.values())
         total_metadata = sum(len(metadata) for metadata in self.content_metadata.values())
         
+        # Kill any existing processes on the port before starting
+        kill_processes_on_port(self.port)
+        
         print(f"🌐 Starting search server on http://localhost:{self.port}")
         print(f"📊 Ready to search across all content types:")
         for ctype in ['video', 'text', 'audio', 'image']:
@@ -517,6 +573,7 @@ class ContentCacheSearchServer:
         print(f"📊 Total: {total_metadata} items with metadata, {total_embeddings} with embeddings")
         
         self.app.run(host='0.0.0.0', port=self.port, debug=debug, threaded=True)
+
 
 class LocationSearch:
     """Handle location-based search functionality"""

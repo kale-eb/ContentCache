@@ -216,13 +216,55 @@ def extract_and_store_location_coordinates(video_metadata):
     
     return None
 
+def trim_metadata_for_api(video_metadata):
+    """
+    Trim video metadata to only essential fields for API calls.
+    Reduces token usage and focuses on relevant information.
+    """
+    if not video_metadata:
+        return {}
+    
+    trimmed = {}
+    
+    # Extract filename from format section
+    format_info = video_metadata.get('format', {})
+    if 'filename' in format_info:
+        trimmed['filename'] = os.path.basename(format_info['filename'])
+    
+    # Extract creation time from format tags
+    format_tags = format_info.get('tags', {})
+    if 'creation_time' in format_tags:
+        trimmed['creation_time'] = format_tags['creation_time']
+    
+    # Extract device/encoder info from streams
+    streams = video_metadata.get('streams', [])
+    for stream in streams:
+        stream_tags = stream.get('tags', {})
+        if 'handler_name' in stream_tags:
+            trimmed['device_info'] = stream_tags['handler_name']
+            break
+        if 'encoder' in stream_tags:
+            trimmed['encoder'] = stream_tags['encoder']
+            break
+    
+    # Extract basic video properties
+    video_stream = next((s for s in streams if s.get('codec_type') == 'video'), {})
+    if video_stream:
+        trimmed['duration'] = video_stream.get('duration', format_info.get('duration'))
+        trimmed['resolution'] = f"{video_stream.get('width', 'unknown')}x{video_stream.get('height', 'unknown')}"
+    
+    return trimmed
+
 def call_gpt4o(frame_captions, audio_summary, video_metadata, vision_analysis=None, text_data=None, processed_location=None):
     # Use API server for video summary with built-in prompts
     try:
+        # Trim metadata to essential fields only
+        trimmed_metadata = trim_metadata_for_api(video_metadata)
+        
         response_data = api_client.get_api_client().openai_video_summary(
             frame_captions=frame_captions,
             audio_summary=audio_summary,
-            video_metadata=video_metadata,
+            video_metadata=trimmed_metadata,
             vision_analysis=vision_analysis,
             text_data=text_data,
             processed_location=processed_location
@@ -264,7 +306,7 @@ def remove_frames_dir(frames_dir):
             print(f"⚠️ Frames directory not found (may have been cleaned already): {frames_dir}")
     except Exception as e:
         print(f"⚠️ Failed to remove frames directory {frames_dir}: {e}")
-    # For temp directories, this isn't critical - OS will clean up eventually
+        # For temp directories, this isn't critical - OS will clean up eventually
 
 def tag_video(vid_path):
     """
@@ -508,33 +550,22 @@ def cleanup_cache_and_memory():
 
 def cleanup_all_models():
     """
-    COMPLETE cleanup: Delete ALL ML models and free all memory.
-    Only call this when you're completely done with ALL processing.
+    Cleanup all loaded models to free memory.
+    Should be called after processing to prevent memory leaks.
     """
-    print("🧹 Performing complete model cleanup...")
+    print("🧹 Cleaning up all models...")
+    
     memory_before = get_memory_usage()
     
     models_cleaned = []
     
-    # Cleanup BLIP models
+    # Cleanup framestagging models
     try:
-        if hasattr(framestagging, 'model'):
-            del framestagging.model
-            models_cleaned.append("BLIP model")
-        if hasattr(framestagging, 'processor'):
-            del framestagging.processor
-            models_cleaned.append("BLIP processor")
         if hasattr(framestagging, 'sentence_model'):
             del framestagging.sentence_model
             models_cleaned.append("SentenceTransformer")
-        if hasattr(framestagging, 'image_processor'):
-            del framestagging.image_processor
-            models_cleaned.append("BLIP image processor")
-        if hasattr(framestagging, 'tokenizer'):
-            del framestagging.tokenizer
-            models_cleaned.append("BLIP tokenizer")
     except Exception as e:
-        print(f"⚠️ Error cleaning up BLIP models: {e}")
+        print(f"⚠️ Error cleaning up framestagging models: {e}")
     
     # Cleanup audio models
     try:
@@ -636,12 +667,12 @@ def cleanup_all_models():
     
     return len(models_cleaned) > 0
 
-def detect_caption_conflicts(blip_caption, context_embedding, quality_score, threshold=-2):
+def detect_caption_conflicts(caption, context_embedding, quality_score, threshold=-2):
     """
-    Detect conflicts between BLIP caption and overall video context.
+    Detect conflicts between generated caption and overall video context.
     
     Args:
-        blip_caption (str): BLIP generated caption
+        caption (str): Generated caption
         context_embedding: Pre-computed embedding of overall video context
         quality_score (int): Quality score from rotation corrector
         threshold (int): Quality score threshold for conflicts
@@ -656,35 +687,35 @@ def detect_caption_conflicts(blip_caption, context_embedding, quality_score, thr
         conflicts.append({
             "type": "low_quality_score", 
             "severity": "high",
-            "details": f"BLIP quality score {quality_score} below threshold {threshold}"
+            "details": f"Quality score {quality_score} below threshold {threshold}"
         })
     
     # Check semantic conflict with overall video context
-    if context_embedding is not None and blip_caption:
+    if context_embedding is not None and caption:
         try:
-            # Get embedding for BLIP caption only (context already embedded)
-            blip_embedding = framestagging.sentence_model.encode([blip_caption])
+            # Get embedding for caption only (context already embedded)
+            caption_embedding = framestagging.sentence_model.encode([caption])
             
             # Calculate similarity
-            similarity = util.pytorch_cos_sim(blip_embedding, context_embedding).item()
+            similarity = util.pytorch_cos_sim(caption_embedding, context_embedding).item()
             
             # If similarity is very low, there might be a conflict
             if similarity < 0.3:  # Threshold for semantic conflict
                 conflicts.append({
                     "type": "semantic_conflict",
                     "severity": "medium",
-                    "details": f"BLIP caption has low semantic similarity ({similarity:.2f}) with overall video context"
+                    "details": f"Caption has low semantic similarity ({similarity:.2f}) with overall video context"
                 })
         except Exception as e:
             # If semantic analysis fails, just skip this check
             pass
     
     # Check for very generic/low-quality captions
-    if len(blip_caption.split()) < 4:
+    if len(caption.split()) < 4:
         conflicts.append({
             "type": "too_generic",
             "severity": "medium", 
-            "details": f"BLIP caption too generic/short: '{blip_caption}'"
+            "details": f"Caption too generic/short: '{caption}'"
         })
     
     return len(conflicts) > 0, conflicts
@@ -731,7 +762,7 @@ def get_single_frame_gpt4o_caption(image_path):
 def get_overall_video_context(selected_frames):
     """
     Get overall video context using GPT-4o mini vision analysis.
-    This runs in parallel with BLIP processing.
+    This runs in parallel with frame processing.
     """
     if not selected_frames:
         return None
@@ -745,7 +776,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     
     Args:
         vid_path (str): Path to video file
-        use_moondream (bool): Whether to use Moondream2 local model instead of BLIP (deprecated)
+        use_moondream (bool): Whether to use Moondream2 local model (deprecated)
         use_moondream_api (bool): Whether to use Moondream API for initial captioning (default: True)
         compress_frames (bool): Whether to compress frames to max_pixels during extraction
         max_pixels (int): Maximum pixels for longest side if compressing frames
@@ -973,9 +1004,15 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         print(f"🧹 Post-concurrent cleanup: {memory_after_concurrent:.1f} MB → {memory_after_cleanup:.1f} MB (-{memory_after_concurrent-memory_after_cleanup:.1f} MB)")
     
     print("\nStep 5: Final comprehensive analysis with GPT-4o...")
-    # Call GPT-4o with all collected data
-    # Note: frame_captions are not currently passed to call_gpt4o as it expects selected_frames for vision analysis
-    result = call_gpt4o(selected_frames, audio_summary, video_metadata, vision_analysis, text_data, processed_location)
+    # Extract actual captions from frame_captions if available
+    caption_texts = []
+    if frame_captions and isinstance(frame_captions, list):
+        for item in frame_captions:
+            if isinstance(item, dict) and 'caption' in item:
+                caption_texts.append(item['caption'])
+    
+    # Call GPT-4o with actual frame captions (not file paths)
+    result = call_gpt4o(caption_texts, audio_summary, video_metadata, vision_analysis, text_data, processed_location)
     
     parsed = json.loads(result)
     memory_after_gpt = get_memory_usage()
@@ -1101,7 +1138,7 @@ if __name__ == "__main__":
         elif use_moondream_api:
             print("🚀 Using Moondream API for initial captioning (fastest option)")
         else:
-            print("🤖 Using BLIP for initial captioning")
+            print("🤖 Using vision analysis for initial captioning")
             
         # Use frame compression by default for 21% speed improvement
         result = tag_video_smart_conflict_resolution(
@@ -1117,7 +1154,7 @@ if __name__ == "__main__":
         
         # Offer model choice
         print("\nChoose vision model:")
-        print("1. BLIP (default, balanced)")
+        print("1. Vision analysis (default, balanced)")
         print("2. Moondream2 (better quality, slower)")
         print("3. Moondream API (fastest, good quality)")
         
@@ -1131,7 +1168,7 @@ if __name__ == "__main__":
         elif use_moondream_api:
             print("🚀 Using Moondream API for initial captioning")
         else:
-            print("🤖 Using BLIP for initial captioning")
+            print("🤖 Using vision analysis for initial captioning")
             
         result = tag_video_smart_conflict_resolution(
             vid_path, use_moondream=use_moondream, use_moondream_api=use_moondream_api, compress_frames=True, max_pixels=1000

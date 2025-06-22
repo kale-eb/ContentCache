@@ -29,8 +29,8 @@ def extract_image_metadata(image_path):
             'filename': filename,
             'coordinates': None,
             'included_description': None
-        }
-        
+    }
+    
         # Try to extract EXIF data
         with Image.open(image_path) as img:
             exif_data = img._getexif()
@@ -108,7 +108,7 @@ def convert_gps_to_decimal(gps_coord, gps_ref):
             decimal = -decimal
             
         return decimal
-        
+            
     except (ValueError, TypeError, IndexError):
         return None
 
@@ -143,18 +143,18 @@ def process_image(image_path):
     """
     try:
         print(f"🖼️ Processing image: {os.path.basename(image_path)}")
-        
+            
         # Step 1: Extract metadata from image file
         print("  📊 Extracting metadata...")
         metadata = extract_image_metadata(image_path)
-        
+            
         # Step 2: Encode image to base64
         print("  🔄 Encoding image...")
         image_base64 = encode_image_to_base64(image_path)
         if not image_base64:
             print("  ❌ Failed to encode image")
             return None
-        
+            
         # Step 3: Get caption and objects from Moondream
         print("  🤖 Analyzing with Moondream...")
         client = get_api_client()

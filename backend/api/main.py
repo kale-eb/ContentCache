@@ -276,9 +276,9 @@ async def openai_video_summary(request: VideoSummaryRequest):
     try:
         # Build the content string with all available information
         content_parts = [
-            f"Frame Captions (BLIP Analysis): {request.frame_captions}",
+            f"Frame Captions: {request.frame_captions}",
             f"Audio Summary: {request.audio_summary}",
-            f"Full Metadata JSON: {json.dumps(request.video_metadata)}"
+            f"Essential Metadata: {json.dumps(request.video_metadata)}"
         ]
         
         # Add vision analysis if available
@@ -308,8 +308,8 @@ async def openai_video_summary(request: VideoSummaryRequest):
         # Built-in system message and user instruction
         system_message = "You are a helpful assistant that analyzes videos"
         user_instruction = (
-            "You will be given frame captions from BLIP analysis, audio summary, and the full metadata JSON from ffprobe for a video file. "
-            + ("You may also receive enhanced vision analysis from GPT-4o mini vision API. " if request.vision_analysis else "")
+            "You will be given frame captions, audio summary, and essential metadata from a video file. "
+            + ("You may also receive enhanced vision analysis. " if request.vision_analysis else "")
             + ("You may also receive prominent text extracted from video frames using OCR. " if request.text_data and request.text_data.get('prominent_text') else "")
             + ("Location information has been pre-processed from GPS coordinates if available. " if request.processed_location else "")
             + "Extract and return the following if present: any included description or comment, creation date, and modification date. "
@@ -320,7 +320,7 @@ async def openai_video_summary(request: VideoSummaryRequest):
             + (", and pre-processed location" if request.processed_location else "")
             + "), return a comprehensive summary, tags, and metadata. You MUST include a metadata key even if there is no metadata. "
             + "IMPORTANT: If metadata is provided (like location or description), give it extra weight in your analysis. "
-            + ("If vision analysis is provided, use it to enhance and validate the BLIP frame captions. " if request.vision_analysis else "")
+            + ("If vision analysis is provided, use it to enhance and validate the frame captions. " if request.vision_analysis else "")
             + ("If text data is provided, use it to identify signs, labels, or other textual content in the video. " if request.text_data and request.text_data.get('prominent_text') else "")
         )
         
@@ -672,10 +672,10 @@ async def openai_image_summary(request: ImageSummaryRequest):
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "What kind of content or scene this is"
-                            },
-                            "objects": {
-                                "type": "array",
-                                "items": {"type": "string"},
+                    },
+                    "objects": {
+                        "type": "array",
+                        "items": {"type": "string"},
                                 "description": "Notable objects in the image"
                             },
                             "style": {
