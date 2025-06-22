@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 
 // Keep a global reference of the window object
 let mainWindow;
@@ -297,3 +298,133 @@ ipcMain.handle('reveal-file', async (event, filePath) => {
     return { success: false, error: error.message };
   }
 });
+
+// Thumbnail generation for video files
+ipcMain.handle('generate-thumbnail', async (event, filePath, contentType) => {
+  try {
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    
+    if (contentType === 'video' || ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm'].includes(ext)) {
+      return await generateVideoThumbnail(filePath);
+    } else if (contentType === 'image' || ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp', '.heic'].includes(ext)) {
+      return await generateImageThumbnail(filePath);
+    } else {
+      // Return a default icon for other file types
+      return await generateDefaultThumbnail(contentType);
+    }
+  } catch (error) {
+    console.error('Thumbnail generation failed:', error);
+    return null;
+  }
+});
+
+async function generateVideoThumbnail(videoPath) {
+  return new Promise((resolve, reject) => {
+    const tempDir = os.tmpdir();
+    const thumbnailPath = path.join(tempDir, `thumb_${Date.now()}.jpg`);
+    
+    // Use ffmpeg to extract a frame at 1 second
+    const ffmpegProcess = spawn('ffmpeg', [
+      '-i', videoPath,
+      '-ss', '00:00:01.000',  // Seek to 1 second
+      '-vframes', '1',        // Extract 1 frame
+      '-vf', 'scale=320:-1',  // Scale to 320px width, maintain aspect ratio
+      '-y',                   // Overwrite output file
+      thumbnailPath
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      if (code === 0 && fs.existsSync(thumbnailPath)) {
+        try {
+          // Read the thumbnail and convert to base64
+          const thumbnailBuffer = fs.readFileSync(thumbnailPath);
+          const base64Thumbnail = thumbnailBuffer.toString('base64');
+          
+          // Clean up temp file
+          fs.unlinkSync(thumbnailPath);
+          
+          resolve(`data:image/jpeg;base64,${base64Thumbnail}`);
+        } catch (error) {
+          reject(error);
+        }
+      } else {
+        // Fallback: try to use system thumbnail for video
+        try {
+          const systemThumbnail = app.getFileIcon(videoPath, { size: 'large' });
+          systemThumbnail.then(icon => {
+            resolve(icon.toDataURL());
+          }).catch(() => resolve(null));
+        } catch (error) {
+          resolve(null);
+        }
+      }
+    });
+
+    ffmpegProcess.on('error', (error) => {
+      // Fallback to system icon
+      try {
+        app.getFileIcon(videoPath, { size: 'large' }).then(icon => {
+          resolve(icon.toDataURL());
+        }).catch(() => resolve(null));
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function generateImageThumbnail(imagePath) {
+  try {
+    // Use Electron's nativeImage to resize the image
+    const image = nativeImage.createFromPath(imagePath);
+    if (image.isEmpty()) {
+      return null;
+    }
+    
+    // Resize to thumbnail width while maintaining aspect ratio
+    const resized = image.resize({ width: 320 });
+    
+    return resized.toDataURL();
+  } catch (error) {
+    console.error('Image thumbnail generation failed:', error);
+    
+    // Fallback to system icon
+    try {
+      const icon = await app.getFileIcon(imagePath, { size: 'large' });
+      return icon.toDataURL();
+    } catch (e) {
+      return null;
+    }
+  }
+}
+
+async function generateDefaultThumbnail(contentType) {
+  // Generate a simple colored rectangle based on content type
+  const colors = {
+    text: '#3b82f6',    // Blue
+    audio: '#f59e0b',   // Orange
+    video: '#ef4444',   // Red
+    image: '#10b981'    // Green
+  };
+  
+  const color = colors[contentType] || '#6b7280';
+  
+  // Create a simple colored square as SVG and convert to data URL
+  const svg = `
+    <svg width="320" height="240" xmlns="http://www.w3.org/2000/svg">
+      <rect width="320" height="240" fill="${color}" opacity="0.2"/>
+      <text x="160" y="130" text-anchor="middle" fill="${color}" font-family="Arial" font-size="24" font-weight="bold">
+        ${contentType.toUpperCase()}
+      </text>
+    </svg>
+  `;
+  
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}

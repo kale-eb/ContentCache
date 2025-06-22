@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchContent: (query, contentTypes, topK) => ipcRenderer.invoke('search-content', query, contentTypes, topK),
   getSearchStatus: () => ipcRenderer.invoke('get-search-status'),
   
+  // File operations
+  openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
+  revealFile: (filePath) => ipcRenderer.invoke('reveal-file', filePath),
+  generateThumbnail: (filePath, contentType) => ipcRenderer.invoke('generate-thumbnail', filePath, contentType),
+  
   // Progress updates
   onProcessingProgress: (callback) => ipcRenderer.on('processing-progress', callback),
   removeProcessingProgressListener: (callback) => ipcRenderer.removeListener('processing-progress', callback)
