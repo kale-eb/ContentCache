@@ -102,92 +102,80 @@ class EmbeddingGenerator:
         filename = Path(file_path).stem
         text_parts.append(filename)
         
+        def safe_extract_text(value, max_depth=3, current_depth=0):
+            """Recursively extract text from nested structures."""
+            if current_depth > max_depth:
+                return []
+            
+            texts = []
+            if isinstance(value, str):
+                if value.strip() and value != "None":
+                    texts.append(value.strip())
+            elif isinstance(value, (int, float)):
+                texts.append(str(value))
+            elif isinstance(value, list):
+                for item in value:
+                    texts.extend(safe_extract_text(item, max_depth, current_depth + 1))
+            elif isinstance(value, dict):
+                for key, val in value.items():
+                    # Skip metadata fields that shouldn't be searchable
+                    # Note: "location" is now searchable (coordinates or place names)
+                    excluded_keys = {
+                        'raw_string', 'type', 'timestamp', 'model_name',
+                        'date_recorded', 'date_taken', 'creation_time',  # Timestamp fields
+                        'modified_time', 'file_size', 'duration', 'resolution',  # Technical metadata
+                        'width', 'height', 'fps', 'bitrate', 'sample_rate',
+                        'channels', 'codec', 'format', 'device_info', 'encoder'
+                    }
+                    if key.lower() not in excluded_keys:
+                        texts.extend(safe_extract_text(val, max_depth, current_depth + 1))
+            return texts
+        
         if content_type == "video":
             # Extract from video summary and tags
             if "video_summary" in metadata:
-                summary = metadata["video_summary"]
-                if isinstance(summary, str):
-                    text_parts.append(summary)
-                elif isinstance(summary, dict):
-                    # Handle structured summary
-                    for key, value in summary.items():
-                        if isinstance(value, str):
-                            text_parts.append(value)
-                        elif isinstance(value, list):
-                            text_parts.extend([str(v) for v in value])
+                summary_texts = safe_extract_text(metadata["video_summary"])
+                text_parts.extend(summary_texts)
             
             if "tags" in metadata:
-                tags = metadata["tags"]
-                if isinstance(tags, dict):
-                    for key, value in tags.items():
-                        if isinstance(value, list):
-                            text_parts.extend(value)
-                        elif isinstance(value, str):
-                            text_parts.append(value)
-                elif isinstance(tags, list):
-                    text_parts.extend([str(t) for t in tags])
-            
-            # Add location info
-            if "metadata" in metadata and "location" in metadata["metadata"]:
-                location = metadata["metadata"]["location"]
-                if location and location != "None":
-                    text_parts.append(location)
+                tag_texts = safe_extract_text(metadata["tags"])
+                text_parts.extend(tag_texts)
         
         elif content_type == "image":
             # Extract from image analysis
             if "analysis" in metadata:
-                analysis = metadata["analysis"]
-                if isinstance(analysis, str):
-                    text_parts.append(analysis)
-                elif isinstance(analysis, dict):
-                    for key, value in analysis.items():
-                        if isinstance(value, str):
-                            text_parts.append(value)
-                        elif isinstance(value, list):
-                            text_parts.extend([str(v) for v in value])
+                analysis_texts = safe_extract_text(metadata["analysis"])
+                text_parts.extend(analysis_texts)
             
             if "summary" in metadata:
-                text_parts.append(str(metadata["summary"]))
-            
-            # Add location info
-            if "location" in metadata and metadata["location"]:
-                text_parts.append(metadata["location"])
+                summary_texts = safe_extract_text(metadata["summary"])
+                text_parts.extend(summary_texts)
         
         elif content_type == "audio":
             # Extract from audio analysis
             if "analysis" in metadata:
-                analysis = metadata["analysis"]
-                if isinstance(analysis, str):
-                    text_parts.append(analysis)
-                elif isinstance(analysis, dict):
-                    for key, value in analysis.items():
-                        if isinstance(value, str):
-                            text_parts.append(value)
-                        elif isinstance(value, list):
-                            text_parts.extend([str(v) for v in value])
+                analysis_texts = safe_extract_text(metadata["analysis"])
+                text_parts.extend(analysis_texts)
             
             if "summary" in metadata:
-                text_parts.append(str(metadata["summary"]))
+                summary_texts = safe_extract_text(metadata["summary"])
+                text_parts.extend(summary_texts)
         
         elif content_type == "text":
             # Extract from text analysis
             if "analysis" in metadata:
-                analysis = metadata["analysis"]
-                if isinstance(analysis, str):
-                    text_parts.append(analysis)
-                elif isinstance(analysis, dict):
-                    for key, value in analysis.items():
-                        if isinstance(value, str):
-                            text_parts.append(value)
-                        elif isinstance(value, list):
-                            text_parts.extend([str(v) for v in value])
+                analysis_texts = safe_extract_text(metadata["analysis"])
+                text_parts.extend(analysis_texts)
             
             # Add content preview if available
             if "content_preview" in metadata:
-                text_parts.append(metadata["content_preview"])
+                preview_texts = safe_extract_text(metadata["content_preview"])
+                text_parts.extend(preview_texts)
         
         # Join all text parts and clean up
-        combined_text = " ".join(text_parts)
+        # Filter out empty strings and ensure all are strings
+        clean_text_parts = [str(part).strip() for part in text_parts if str(part).strip()]
+        combined_text = " ".join(clean_text_parts)
         
         # Clean up the text (remove extra whitespace, newlines, etc.)
         cleaned_text = " ".join(combined_text.split())

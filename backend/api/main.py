@@ -848,6 +848,7 @@ Extract and return:
 1. search_query: The core search terms (remove location/date filters)
 2. location: Specific location to geocode (university, landmark, city, etc.) or null
 3. date: Date range filter or null
+4. search_radius: Intelligent search radius in kilometers based on location specificity
 
 For dates:
 - Convert relative terms like "last 2 months", "past week", "yesterday" to UTC date ranges
@@ -859,10 +860,21 @@ For locations:
 - Convert casual references like "brown" → "Brown University", "mit" → "MIT"
 - If no location mentioned, return null
 
+For search_radius (kilometers):
+- Specific buildings/addresses (Brown University, specific restaurant, exact venue): 2-3 km
+- Landmarks/attractions (Six Flags, Central Park, Golden Gate Bridge): 5-8 km
+- Neighborhoods/districts (Downtown Boston, Mission District, Cambridge): 8-15 km
+- Cities (Boston, San Francisco, Providence): 20-30 km
+- Metro areas (Greater Boston, Bay Area): 40-60 km
+- States/large regions (Massachusetts, Rhode Island): 80-120 km
+- Large states/countries (California, Texas): 150-300 km
+- If no location mentioned, return null
+
 Examples:
-- "exercise videos at brown within the last two months" → search_query: "exercise videos", location: "Brown University", date: {{start: "2025-04-20...", end: "2025-06-20..."}}
-- "machine learning papers" → search_query: "machine learning papers", location: null, date: null
-- "photos from yesterday" → search_query: "photos", location: null, date: {{start: "2025-06-19...", end: "2025-06-19..."}}
+- "exercise videos at brown within the last two months" → search_query: "exercise videos", location: "Brown University", search_radius: 3, date: {{start: "2025-04-20...", end: "2025-06-20..."}}
+- "photos from Boston" → search_query: "photos", location: "Boston", search_radius: 25, date: null
+- "videos in Massachusetts" → search_query: "videos", location: "Massachusetts", search_radius: 100, date: null
+- "machine learning papers" → search_query: "machine learning papers", location: null, search_radius: null, date: null
 
 Be precise with location names for geocoding accuracy."""
 
@@ -881,6 +893,10 @@ Be precise with location names for geocoding accuracy."""
                         "type": ["string", "null"],
                         "description": "Specific location to geocode (full name preferred) or null if none"
                     },
+                    "search_radius": {
+                        "type": ["number", "null"],
+                        "description": "Intelligent search radius in kilometers based on location specificity (2-3 for buildings, 20-30 for cities, 80-120 for states), or null if no location"
+                    },
                     "date": {
                         "type": ["object", "null"],
                         "description": "Date range filter with start and end UTC timestamps, or null if none",
@@ -896,7 +912,7 @@ Be precise with location names for geocoding accuracy."""
                         }
                     }
                 },
-                "required": ["search_query", "location", "date"]
+                "required": ["search_query", "location", "search_radius", "date"]
             }
         }
 

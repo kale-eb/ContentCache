@@ -77,8 +77,9 @@ def kill_processes_on_port(port):
 
 
 class ContentCacheSearchServer:
-    def __init__(self, port=5001):
+    def __init__(self, port=5001, auto_sync=True):
         self.port = port
+        self.auto_sync = auto_sync
         self.app = Flask(__name__)
         CORS(self.app)
         
@@ -284,6 +285,12 @@ class ContentCacheSearchServer:
         # Load embeddings for each content type
         for content_type in ['video', 'text', 'audio', 'image']:
             self._load_content_embeddings(content_type)
+        
+        # Check for discrepancies and auto-sync if needed
+        if self.auto_sync:
+            self._auto_sync_embeddings_if_needed()
+        else:
+            self._report_embedding_status()
 
     def _load_content_embeddings(self, content_type: str):
         """Load embeddings for a specific content type."""
@@ -320,6 +327,123 @@ class ContentCacheSearchServer:
         if embeddings_loaded > 0:
             print(f"✅ Loaded {content_type} embeddings: {embeddings_loaded} items from {len(embedding_files)} cache files")
 
+    def _auto_sync_embeddings_if_needed(self):
+        """Automatically sync embeddings if discrepancies are detected."""
+        print("\n🔍 Checking embedding synchronization...")
+        
+        discrepancies = []
+        for content_type in ['video', 'text', 'audio', 'image']:
+            metadata_count = len(self.content_metadata[content_type])
+            embedding_count = len(self.content_embeddings[content_type])
+            
+            if metadata_count != embedding_count:
+                discrepancy = {
+                    'content_type': content_type,
+                    'metadata_count': metadata_count,
+                    'embedding_count': embedding_count,
+                    'missing': metadata_count - embedding_count
+                }
+                discrepancies.append(discrepancy)
+                print(f"⚠️ {content_type.title()}: {metadata_count} metadata, {embedding_count} embeddings ({abs(discrepancy['missing'])} {'missing' if discrepancy['missing'] > 0 else 'extra'})")
+        
+        if not discrepancies:
+            print("✅ All embeddings are in sync!")
+            return
+        
+        print(f"\n🔄 Found discrepancies in {len(discrepancies)} content types. Auto-syncing...")
+        
+        # Import embedding generator
+        try:
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'processing'))
+            from embedding_generator import generate_embeddings_from_metadata_file
+        except ImportError as e:
+            print(f"❌ Failed to import embedding generator: {e}")
+            print("⚠️ Continuing with existing embeddings...")
+            return
+        
+        # Sync each content type with discrepancies
+        synced_count = 0
+        for discrepancy in discrepancies:
+            content_type = discrepancy['content_type']
+            
+            # Skip if no metadata to sync
+            if discrepancy['metadata_count'] == 0:
+                print(f"⏭️ Skipping {content_type} (no metadata)")
+                continue
+            
+            print(f"🔄 Syncing {content_type} embeddings...")
+            
+            try:
+                # Get metadata file path
+                metadata_paths = {
+                    'video': get_video_metadata_path(),
+                    'text': get_text_metadata_path(),
+                    'audio': get_audio_metadata_path(),
+                    'image': get_image_metadata_path()
+                }
+                
+                metadata_file = metadata_paths[content_type]
+                
+                # Generate embeddings from metadata file
+                result = generate_embeddings_from_metadata_file(content_type, metadata_file, force_regenerate=False)
+                
+                if result:
+                    # Reload embeddings for this content type
+                    self.content_embeddings[content_type] = {}
+                    self._load_content_embeddings(content_type)
+                    
+                    new_embedding_count = len(self.content_embeddings[content_type])
+                    print(f"✅ {content_type.title()} synced: {discrepancy['metadata_count']} metadata → {new_embedding_count} embeddings")
+                    synced_count += 1
+                else:
+                    print(f"❌ Failed to sync {content_type} embeddings")
+                    
+            except Exception as e:
+                print(f"❌ Error syncing {content_type}: {e}")
+        
+        if synced_count > 0:
+            print(f"\n✅ Successfully synced {synced_count}/{len(discrepancies)} content types")
+            
+            # Show final counts
+            print("\n📊 Final embedding counts:")
+            for content_type in ['video', 'text', 'audio', 'image']:
+                metadata_count = len(self.content_metadata[content_type])
+                embedding_count = len(self.content_embeddings[content_type])
+                status = "✅" if metadata_count == embedding_count else "⚠️"
+                print(f"  {status} {content_type.title()}: {metadata_count} metadata, {embedding_count} embeddings")
+        else:
+            print("\n⚠️ No embeddings were successfully synced")
+
+    def _report_embedding_status(self):
+        """Report embedding status without syncing."""
+        print("\n📊 Embedding status check (auto-sync disabled):")
+        
+        total_metadata = 0
+        total_embeddings = 0
+        discrepancies_found = False
+        
+        for content_type in ['video', 'text', 'audio', 'image']:
+            metadata_count = len(self.content_metadata[content_type])
+            embedding_count = len(self.content_embeddings[content_type])
+            
+            total_metadata += metadata_count
+            total_embeddings += embedding_count
+            
+            if metadata_count != embedding_count:
+                discrepancies_found = True
+                missing = metadata_count - embedding_count
+                print(f"  ⚠️ {content_type.title()}: {metadata_count} metadata, {embedding_count} embeddings ({abs(missing)} {'missing' if missing > 0 else 'extra'})")
+            else:
+                print(f"  ✅ {content_type.title()}: {metadata_count} items (in sync)")
+        
+        print(f"\n📈 Total: {total_metadata} metadata items, {total_embeddings} embeddings")
+        
+        if discrepancies_found:
+            print("💡 Tip: Restart with --auto-sync to automatically fix discrepancies")
+            print("💡 Or run: python sync_embeddings.py")
+        else:
+            print("✅ All embeddings are perfectly synced!")
+
     def _perform_search(self, query: str, content_type: str = 'all', top_k: int = 10) -> List[Dict]:
         """Perform semantic search with intelligent filtering on results."""
         if not self.sentence_model:
@@ -337,14 +461,16 @@ class ContentCacheSearchServer:
             parsed = parse_result.get('parsed', {})
             core_query = parsed.get('search_query', query)
             location_text = parsed.get('location')
+            search_radius = parsed.get('search_radius')
             date_filter = parsed.get('date')
             
-            print(f"🧠 Query parsed - Core: '{core_query}', Location: {location_text}, Date: {date_filter}")
+            print(f"🧠 Query parsed - Core: '{core_query}', Location: {location_text}, Radius: {search_radius}km, Date: {date_filter}")
             
         except Exception as e:
             print(f"⚠️ Query parsing failed, using original query: {e}")
             core_query = query
             location_text = None
+            search_radius = None
             date_filter = None
         
         # Step 1: Perform semantic search with threshold
@@ -420,7 +546,7 @@ class ContentCacheSearchServer:
         
         # Step 2: Apply location filtering if specified
         if location_text:
-            semantic_results = self._apply_location_filter(semantic_results, location_text)
+            semantic_results = self._apply_location_filter(semantic_results, location_text, search_radius)
         
         # Step 3: Apply date filtering with bucketing if specified
         if date_filter:
@@ -429,9 +555,11 @@ class ContentCacheSearchServer:
         # Return top results
         return semantic_results[:top_k]
     
-    def _apply_location_filter(self, results: List[Dict], location_text: str) -> List[Dict]:
-        """Apply location filtering to search results."""
-        print(f"🌍 Applying location filter for: '{location_text}'")
+    def _apply_location_filter(self, results: List[Dict], location_text: str, search_radius: Optional[float] = None) -> List[Dict]:
+        """Apply location filtering to search results with dynamic radius."""
+        # Use intelligent radius or fallback to 50km
+        radius_km = search_radius if search_radius is not None else 50.0
+        print(f"🌍 Applying location filter for: '{location_text}' (radius: {radius_km}km)")
         
         # Try to geocode the location
         coordinates = location_search.forward_geocode(location_text)
@@ -450,24 +578,47 @@ class ContentCacheSearchServer:
             
             if file_path in self.content_metadata[content_type]:
                 metadata = self.content_metadata[content_type][file_path]
-                location_data = metadata.get('metadata', {}).get('location')
                 
-                # Handle both new coordinate format and old string format
+                # Check both 'location' (videos) and 'coordinates' (images) fields
+                location_data = metadata.get('metadata', {}).get('location')
+                if not location_data or location_data == 'None':
+                    # For images, check the 'coordinates' field as well
+                    location_data = metadata.get('coordinates')
+                
+                # Handle multiple location formats
                 content_coords = None
                 
                 if isinstance(location_data, dict) and location_data.get('type') == 'coordinates':
-                    # New coordinate format
+                    # Legacy nested format (images still use this in coordinates field)
+                    content_coords = (location_data.get('latitude'), location_data.get('longitude'))
+                elif isinstance(location_data, dict) and 'latitude' in location_data and 'longitude' in location_data:
+                    # Image coordinates format: {'latitude': lat, 'longitude': lon}
                     content_coords = (location_data.get('latitude'), location_data.get('longitude'))
                 elif isinstance(location_data, str) and location_data not in ['None', '']:
-                    # Old string format - try to extract coordinates or geocode
-                    # For now, we'll include all string-based locations as potential matches
-                    # TODO: Could implement reverse-geocoding of old string format
-                    print(f"📍 Found string location: {location_data}")
-                    # Include in results but without distance calculation
-                    result['location_match'] = 'text_based'
-                    result['location_text'] = location_data
-                    location_filtered.append(result)
-                    continue
+                    # String format - could be coordinates "lat, lon" or place name
+                    import re
+                    coord_pattern = r'([+-]?\d+\.?\d*)[,\s]+([+-]?\d+\.?\d*)'
+                    match = re.search(coord_pattern, location_data)
+                    
+                    if match:
+                        # Found coordinate string like "37.7749, -122.4194"
+                        try:
+                            lat, lon = float(match.group(1)), float(match.group(2))
+                            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                                content_coords = (lat, lon)
+                                print(f"📍 Parsed coordinates from string: {lat}, {lon}")
+                            else:
+                                print(f"⚠️ Invalid coordinate ranges in string: {lat}, {lon}")
+                        except ValueError:
+                            pass
+                    
+                    # If not coordinates, treat as place name text
+                    if not content_coords:
+                        print(f"📍 Found text location: {location_data}")
+                        result['location_match'] = 'text_based'
+                        result['location_text'] = location_data
+                        location_filtered.append(result)
+                        continue
                 
                 if content_coords and content_coords[0] is not None and content_coords[1] is not None:
                     # Calculate distance
@@ -475,8 +626,8 @@ class ContentCacheSearchServer:
                         target_lat, target_lon, content_coords[0], content_coords[1]
                     )
                     
-                    # Include if within 50km
-                    if distance <= 50:
+                    # Include if within dynamic radius
+                    if distance <= radius_km:
                         result['location_match'] = 'coordinate_based'
                         result['distance_km'] = round(distance, 2)
                         result['location'] = {
@@ -591,48 +742,6 @@ class LocationSearch:
             r'\b([a-zA-Z\s]+)\s+(downtown|uptown|city center|campus|park|beach|mountain|lake|river)\b',
         ]
     
-    def detect_location_query(self, query: str) -> Optional[str]:
-        """Detect if query contains location references"""
-        query_lower = query.lower()
-        
-        # First check for explicit location keywords that indicate spatial queries
-        explicit_location_indicators = [
-            'near', 'at', 'in', 'around', 'close to', 'nearby', 'from'
-        ]
-        
-        has_location_indicator = any(indicator in query_lower for indicator in explicit_location_indicators)
-        
-        # Check for location patterns only if we have location indicators OR specific landmarks
-        for pattern in self.location_patterns:
-            match = re.search(pattern, query_lower, re.IGNORECASE)
-            if match:
-                matched_text = match.group(0).strip()
-                
-                # For university/landmark patterns, always consider them location queries
-                if any(word in matched_text for word in ['university', 'college', 'school', 'institute', 'academy', 'bridge', 'park']):
-                    return matched_text
-                
-                # For other patterns, only if we have explicit location indicators
-                if has_location_indicator:
-                    return matched_text
-        
-        # Check for location keywords with following text (only if explicit indicators present)
-        if has_location_indicator:
-            location_keywords = [
-                'near', 'at', 'in', 'around', 'close to', 'nearby', 'from'
-            ]
-            
-            for keyword in location_keywords:
-                if keyword in query_lower:
-                    # Extract potential location after the keyword
-                    parts = query_lower.split(keyword, 1)
-                    if len(parts) > 1:
-                        potential_location = parts[1].strip()
-                        # Clean up and return meaningful location text (must be reasonable length)
-                        if len(potential_location) > 2 and len(potential_location) < 50:
-                            return f"{keyword} {potential_location}".strip()
-        
-        return None
     
     def forward_geocode(self, location_text: str) -> Optional[Tuple[float, float]]:
         """Convert location text to coordinates using Google Maps API"""
@@ -674,29 +783,6 @@ class LocationSearch:
         # Earth's radius in kilometers
         r = 6371
         return c * r
-    
-    def find_nearby_content(self, target_lat: float, target_lon: float, all_metadata: Dict, 
-                          max_distance_km: float = 50) -> List[Tuple[str, float]]:
-        """Find content within max_distance_km of target coordinates"""
-        nearby_content = []
-        
-        for file_path, metadata in all_metadata.items():
-            location_data = metadata.get('metadata', {}).get('location')
-            
-            if location_data and isinstance(location_data, dict) and location_data.get('type') == 'coordinates':
-                content_lat = location_data.get('latitude')
-                content_lon = location_data.get('longitude')
-                
-                if content_lat is not None and content_lon is not None:
-                    distance = self.calculate_distance(target_lat, target_lon, content_lat, content_lon)
-                    
-                    if distance <= max_distance_km:
-                        nearby_content.append((file_path, distance))
-        
-        # Sort by distance (closest first)
-        nearby_content.sort(key=lambda x: x[1])
-        return nearby_content
-
 # Initialize location search
 location_search = LocationSearch()
 
@@ -707,10 +793,17 @@ def main():
     parser = argparse.ArgumentParser(description='ContentCache Search Server')
     parser.add_argument('--port', type=int, default=5001, help='Server port (default: 5001)')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--no-auto-sync', action='store_true', help='Disable automatic embedding synchronization on startup')
     
     args = parser.parse_args()
     
-    server = ContentCacheSearchServer(port=args.port)
+    # Auto-sync is enabled by default, disabled if --no-auto-sync is passed
+    auto_sync = not args.no_auto_sync
+    
+    if not auto_sync:
+        print("🔄 Auto-sync disabled. Server will start faster but may have embedding discrepancies.")
+    
+    server = ContentCacheSearchServer(port=args.port, auto_sync=auto_sync)
     server.run(debug=args.debug)
 
 if __name__ == '__main__':

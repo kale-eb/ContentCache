@@ -190,25 +190,17 @@ def extract_and_store_location_coordinates(video_metadata):
                     
                     # Validate coordinate ranges
                     if -90 <= lat <= 90 and -180 <= lon <= 180:
-                        location_data = {
-                            'type': 'coordinates',
-                            'latitude': lat,
-                            'longitude': lon,
-                            'raw_string': location_str
-                        }
-                        debug_print(f"📍 Video coordinates extracted: {lat}, {lon}")
-                        return location_data
+                        # Return simple coordinate string for consistent storage
+                        coordinate_string = f"{lat}, {lon}"
+                        debug_print(f"📍 Video coordinates extracted: {coordinate_string}")
+                        return coordinate_string
                     else:
                         debug_print(f"⚠️ Invalid coordinate ranges: lat={lat}, lon={lon}")
                         continue
                 else:
-                    # If no coordinates found, store as text for potential future processing
+                    # If no coordinates found, store location text directly
                     debug_print(f"📍 Video location (text): {location_str}")
-                    return {
-                        'type': 'text',
-                        'location_text': location_str,
-                        'raw_string': location_str
-                    }
+                    return location_str
                     
             except Exception as e:
                 debug_print(f"⚠️ Location processing error: {e}")
@@ -433,6 +425,14 @@ def save_video_metadata(vid_path, metadata, output_file=None, processed_location
         json.dump(all_data, f, indent=2)
 
     print(f"✅ Metadata saved for: {abs_path}")
+    
+    # Generate embeddings for search functionality
+    try:
+        from embedding_generator import generate_video_embeddings
+        generate_video_embeddings(abs_path, all_data[abs_path])
+        debug_print(f"✅ Generated embeddings for: {abs_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to generate video embeddings: {e}")
 
 # ============================================================================
 # ENHANCED VISUAL ANALYSIS WITH GPT-4O MINI VISION API

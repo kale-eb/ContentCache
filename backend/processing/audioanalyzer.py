@@ -148,10 +148,24 @@ def save_audio_metadata(file_path, result, metadata_file="audio_metadata.json"):
             metadata = {}
     else:
         metadata = {}
+    
+    # Use absolute path for consistency
+    abs_path = os.path.abspath(file_path)
+    
     # Save or update entry
-    metadata[file_path] = result
+    metadata[abs_path] = result
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2)
+    
+    print(f"✅ Audio metadata saved for: {abs_path}")
+    
+    # Generate embeddings for search functionality
+    try:
+        from embedding_generator import generate_audio_embeddings
+        generate_audio_embeddings(abs_path, result)
+        print(f"✅ Generated embeddings for: {abs_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to generate audio embeddings: {e}")
 
 if __name__ == "__main__":
     import sys

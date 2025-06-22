@@ -58,10 +58,8 @@ def extract_image_metadata(image_path):
                     )
                     
                     if lat is not None and lon is not None:
-                        metadata['coordinates'] = {
-                            'latitude': lat,
-                            'longitude': lon
-                        }
+                        # Store as simple coordinate string for consistency with videos
+                        metadata['coordinates'] = f"{lat}, {lon}"
                 
                 # Extract description/comment fields
                 description_fields = ['ImageDescription', 'UserComment', 'XPComment', 'XPSubject']
@@ -173,11 +171,24 @@ def process_image(image_path):
         # Step 4: Get structured analysis from OpenAI
         print("  🧠 Generating structured analysis...")
         
+        # Convert coordinate string back to dict for API compatibility
+        coordinates_for_api = None
+        if metadata['coordinates']:
+            import re
+            coord_pattern = r'([+-]?\d+\.?\d*)[,\s]+([+-]?\d+\.?\d*)'
+            match = re.search(coord_pattern, metadata['coordinates'])
+            if match:
+                try:
+                    lat, lon = float(match.group(1)), float(match.group(2))
+                    coordinates_for_api = {'latitude': lat, 'longitude': lon}
+                except ValueError:
+                    pass
+        
         summary_result = client.openai_image_summary(
             caption=caption,
             objects=objects,
             filename=metadata['filename'],
-            coordinates=metadata['coordinates'],
+            coordinates=coordinates_for_api,
             included_description=metadata['included_description']
         )
         
@@ -227,6 +238,14 @@ def save_image_metadata(image_path, analysis_result, output_file=None):
             json.dump(all_data, f, indent=2)
         
         print(f"✅ Metadata saved for: {abs_path}")
+        
+        # Generate embeddings for search functionality
+        try:
+            from embedding_generator import generate_image_embeddings
+            generate_image_embeddings(abs_path, analysis_result)
+            print(f"✅ Generated embeddings for: {abs_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to generate image embeddings: {e}")
         
     except Exception as e:
         print(f"❌ Error saving metadata for {image_path}: {e}")
