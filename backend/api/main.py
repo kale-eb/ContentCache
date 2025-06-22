@@ -1004,7 +1004,7 @@ async def moondream_caption(request: MoondreamRequest):
         image = decode_base64_to_image(request.image_base64)
         
         # Generate caption
-        result = model.caption(image, length="normal")
+        result = model.caption(image, length="short")
         
         return {"caption": result.get("caption", "")}
     except ImportError:
