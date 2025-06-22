@@ -306,34 +306,29 @@ async def openai_video_summary(request: VideoSummaryRequest):
                 content_parts.insert(-1, f"Text Detection Summary: Found text in {request.text_data['frames_with_text']}/{request.text_data['total_frames_processed']} frames")
         
         # Built-in system message and user instruction
-        system_message = "You are a helpful assistant that analyzes videos"
-        user_instruction = (
-            "You will be given frame captions, audio summary, and essential metadata from a video file. "
-            + ("You may also receive enhanced vision analysis. " if request.vision_analysis else "")
-            + ("You may also receive prominent text extracted from video frames using OCR. " if request.text_data and request.text_data.get('prominent_text') else "")
-            + ("Location information has been pre-processed from GPS coordinates if available. " if request.processed_location else "")
-            + "Extract and return the following if present: any included description or comment, creation date, and modification date. "
-            + "IMPORTANT: Convert any dates to UTC ISO format (YYYY-MM-DDTHH:MM:SS.000000Z) for consistent searching. "
-            + "Then, using all the provided information (metadata, frame captions, audio summary"
-            + (", vision analysis" if request.vision_analysis else "")
-            + (", extracted text" if request.text_data and request.text_data.get('prominent_text') else "")
-            + (", and pre-processed location" if request.processed_location else "")
-            + "), return a comprehensive summary, tags, and metadata. You MUST include a metadata key even if there is no metadata. "
-            + "IMPORTANT: If metadata is provided (like location or description), give it extra weight in your analysis. "
-            + ("If vision analysis is provided, use it to enhance and validate the frame captions. " if request.vision_analysis else "")
-            + ("If text data is provided, use it to identify signs, labels, or other textual content in the video. " if request.text_data and request.text_data.get('prominent_text') else "")
-        )
+        system_message = "Analyze videos using provided data, which will include frame captions, audio summary, and metadata. May also include enhanced vision analysis OCR, and location coordinates."
+        
+        # Build dynamic instruction based on available data
+        data_types = ["frame captions", "audio summary", "metadata"]
+        if request.vision_analysis:
+            data_types.append("vision analysis")
+        if request.text_data and request.text_data.get('prominent_text'):
+            data_types.append("OCR text")
+        if request.processed_location:
+            data_types.append("location")
+            
+        user_instruction = f"Analyze using: {', '.join(data_types)}. Convert dates to UTC ISO format. Return summary, tags, and metadata (required even if empty)."
         
         # Function definition for structured output (moved from videotagger.py)
         function_def = {
             "name": "tag_video_metadata",
-            "description": "Returns summary and keyword tags about a video based on frames, audio summary, and existing metadata.",
+            "description": "Extract video summary and tags",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "video_summary": {
                         "type": "string",
-                        "description": "A 2 sentence summary of the video depicted"
+                        "description": "2 sentence summary"
                     },
                     "tags": {
                         "type": "object",
@@ -341,37 +336,37 @@ async def openai_video_summary(request: VideoSummaryRequest):
                             "mood": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Keywords describing the mood"
+                                "description": "Mood keywords"
                             },
                             "locations": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Types of locations shown"
+                                "description": "Locations shown (if applicable)"
                             },
                             "context": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "What kind of content or story this is"
+                                "description": "Content type"
                             },
                             "objects": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Notable objects in the video"
+                                "description": "Key objects (if applicable)"
                             },
                             "video_style": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Video format or camera style (e.g., b-roll, product video, selfie, talking head, action video, vlog)"
+                                "description": "Camera/format style"
                             },
                             "actions": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Actions depicted in the video (if any are described)"
+                                "description": "Actions shown (if applicable)"
                             },
                             "people": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "People in the video (such as friends, family, crowd, specific names mentioned in either the audio summary or the metadata, etc.)"
+                                "description": "People mentioned (if applicable)"
                             }
                         },
                         "required": ["mood", "locations", "context", "objects", "video_style", "actions", "people"]
@@ -381,15 +376,15 @@ async def openai_video_summary(request: VideoSummaryRequest):
                         "properties": {
                             "date_recorded": {
                                 "type": "string",
-                                "description": "Date when the video was recorded/created/added (if available) in UTC ISO format (YYYY-MM-DDTHH:MM:SS.000000Z), 'None' if not available"
+                                "description": "Recording date in UTC ISO or 'None'"
                             },
                             "location": {
                                 "type": "string",
-                                "description": "Coordinates where the video was recorded (pre-processed from metadata), 'None' if not available"
+                                "description": "Coordinates or 'None'"
                             },
                             "included_description": {
                                 "type": "string",
-                                "description": "Description provided in the video metadata (if available), 'None' if not"
+                                "description": "Metadata description or 'None'"
                             }
                         }
                     }
@@ -455,38 +450,28 @@ async def openai_audio_analysis(request: AudioAnalysisRequest):
     """Analyze audio segments using GPT-4o with built-in prompt and function calling."""
     try:
         # Built-in prompt for audio analysis
-        base_prompt = (
-            "Given the following audio metadata, including transcription, features, and tags, "
-            "provide a concise summary of the audio and a list of keywords (including mood, topics, genre, and any other relevant descriptors).\n\n"
-            f"Audio Segments Data (JSON):\n{json.dumps(request.segments, indent=2)}\n"
-        )
+        base_prompt = f"Analyze audio data and provide summary + keywords.\n\nData: {json.dumps(request.segments, indent=2)}\n"
         
         # Add filename context for audio files
         if request.filename_info and request.filename_info.get("is_audio_file"):
             title = request.filename_info.get("title", "")
-            base_prompt += (
-                f"\nAdditional Context:\n"
-                f"This is an audio file with the filename/title: '{title}'\n"
-                f"If the filename provides meaningful context about the audio content (e.g., describes the type of sound, "
-                f"mood, or purpose), please incorporate that information into your analysis. Consider how the filename "
-                f"might indicate the intended use, genre, or characteristics of the audio.\n"
-            )
+            base_prompt += f"\nFilename: '{title}' (use for context if relevant)\n"
         
         # Built-in function schema
         function_def = {
             "name": "summarize_audio",
-            "description": "Summarize audio and extract keywords (mood, topics, genre, etc.)",
+            "description": "Audio summary and keywords",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "A concise summary of the audio."
+                        "description": "Concise summary"
                     },
                     "keywords": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "A list of keywords describing mood, topics, genre, and other relevant descriptors."
+                        "description": "Mood, topics, genre keywords"
                     }
                 },
                 "required": ["summary", "keywords"]
@@ -541,45 +526,26 @@ async def openai_image_analysis(request: ImageAnalysisRequest):
             # Only include OCR if it contains meaningful words
             meaningful_words = [word for word in prominent_text.split() if len(word) > 2 and word.isalpha()]
             if len(meaningful_words) > 0:
-                analysis_prompt += (
-                    f"IMPORTANT: OCR detected meaningful text: {prominent_text}\n"
-                    f"Include this in section 3 if clearly readable. If the OCR text appears garbled or meaningless, skip section 3 entirely.\n\n"
-                )
+                analysis_prompt += f"OCR text: {prominent_text}\n"
         
-        # Add location information if available (handle both old string format and new dict format)
+        # Add location information if available
         if request.processed_location:
             if isinstance(request.processed_location, dict):
                 if request.processed_location.get('type') == 'coordinates':
                     lat, lon = request.processed_location['latitude'], request.processed_location['longitude']
-                    analysis_prompt += (
-                        f"LOCATION: This image was taken at GPS coordinates: {lat}, {lon}\n"
-                        f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
-                    )
+                    analysis_prompt += f"GPS: {lat}, {lon}\n"
                 elif request.processed_location.get('type') == 'text':
-                    analysis_prompt += (
-                        f"LOCATION: This image was taken at: {request.processed_location['location_text']}\n"
-                        f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
-                    )
+                    analysis_prompt += f"Location: {request.processed_location['location_text']}\n"
             else:
                 # Legacy string format
-                analysis_prompt += (
-                    f"LOCATION: This image was taken at: {request.processed_location}\n"
-                    f"Please incorporate this location information into your analysis, especially for section 4 (setting/location).\n\n"
-                )
-        
-        analysis_prompt += "Be thorough and specific in your analysis."
+                analysis_prompt += f"Location: {request.processed_location}\n"
         
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are an efficient image analyst focused on extracting meaningful keywords. "
-                        "Provide concise, keyword-based analysis that maximizes information density while minimizing token usage. "
-                        "Skip verbose descriptions and garbled text. Use comma-separated keywords for categories. "
-                        "Only include categories that add genuine value to understanding the image content."
-                    )
+                    "content": "Efficient image analysis. Use keywords, skip irrelevant sections."
                 },
                 {
                     "role": "user",
@@ -632,28 +598,26 @@ async def openai_image_summary(request: ImageSummaryRequest):
             content_parts.append(f"Included Description: {request.included_description}")
         
         # Built-in system message and user instruction
-        system_message = "You are a helpful assistant that analyzes images and provides structured metadata"
-        user_instruction = (
-            "You will be given an image caption, detected objects, filename, and potentially GPS coordinates and description. "
-            + ("Location information from GPS coordinates should be incorporated into your analysis. " if request.coordinates else "")
-            + ("The included description provides additional context about the image. " if request.included_description else "")
-            + "Extract and return the following if present: creation date from filename (if detectable), and location. "
-            + "IMPORTANT: Convert any dates to UTC ISO format (YYYY-MM-DDTHH:MM:SS.000000Z) for consistent searching. "
-            + "Then, using all the provided information, return a comprehensive summary, tags, and metadata. "
-            + "IMPORTANT: If GPS coordinates are provided, give them extra weight in determining the location. "
-            + "If an included description is provided, use it to enhance and validate your analysis. "
-        )
+        system_message = "Analyze images for metadata"
+        
+        data_types = ["caption", "objects", "filename"]
+        if request.coordinates:
+            data_types.append("GPS")
+        if request.included_description:
+            data_types.append("description")
+            
+        user_instruction = f"Extract from: {', '.join(data_types)}. Convert dates to UTC ISO. Return summary, tags, metadata."
         
         # Function definition for structured output
         function_def = {
             "name": "tag_image_metadata",
-            "description": "Returns summary and keyword tags about an image based on caption, objects, and metadata.",
+            "description": "Extract image summary and tags",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "image_summary": {
                         "type": "string",
-                        "description": "A 2 sentence summary of the image"
+                        "description": "2 sentence summary"
                     },
                     "tags": {
                         "type": "object",
@@ -661,37 +625,37 @@ async def openai_image_summary(request: ImageSummaryRequest):
                             "mood": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Keywords describing the mood or atmosphere"
+                                "description": "Mood keywords"
                             },
                             "locations": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Types of locations or settings shown"
+                                "description": "Location types"
                             },
                             "context": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "What kind of content or scene this is"
+                                "description": "Scene type"
                     },
                     "objects": {
                         "type": "array",
                         "items": {"type": "string"},
-                                "description": "Notable objects in the image"
+                                "description": "Key objects"
                             },
                             "style": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Visual style or photography type (e.g., portrait, landscape, macro, street photography)"
+                                "description": "Visual style"
                             },
                             "activities": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Activities or actions depicted in the image"
+                                "description": "Activities shown"
                             },
                             "people": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "People in the image (such as friends, family, crowd, specific names if mentioned)"
+                                "description": "People mentioned"
                             }
                         },
                         "required": ["mood", "locations", "context", "objects", "style", "activities", "people"]
@@ -701,15 +665,15 @@ async def openai_image_summary(request: ImageSummaryRequest):
                         "properties": {
                             "date_taken": {
                                 "type": "string",
-                                "description": "Date when the image was taken (if detectable from filename or metadata) in UTC ISO format, 'None' if not available"
+                                "description": "Date in UTC ISO or 'None'"
                             },
                             "location": {
                                 "type": "string",
-                                "description": "Location where the image was taken (from GPS coordinates or context), 'None' if not available"
+                                "description": "Location or 'None'"
                             },
                             "included_description": {
                                 "type": "string",
-                                "description": "Description provided in the image metadata (if available), 'None' if not"
+                                "description": "Metadata description or 'None'"
                             }
                         }
                     }
@@ -759,46 +723,36 @@ async def openai_text_analysis(request: TextAnalysisRequest):
         file_ext = Path(request.file_path).suffix.lower()
         
         # Built-in prompt for text analysis
-        prompt = f"""Analyze this text document and provide the following specific information:
+        prompt = f"""Analyze: {filename} ({file_ext}, {len(request.text_content)} chars)
 
-FILENAME: {filename}
-FILE TYPE: {file_ext}
-CONTENT LENGTH: {len(request.text_content)} characters
-
-DOCUMENT CONTENT:
+Content:
 {request.text_content}
 
-Please provide exactly these 4 fields:
-1. summary - Brief summary of file content (1-2 sentences)
-2. key_topics - Array of keywords representing main topics
-3. tone - Writing tone (e.g., professional, casual, formal, academic, creative)
-4. language - Primary language used (e.g., English, Spanish, etc.)
-
-Format your response as clean JSON with exactly these field names."""
+Return: summary (1-2 sentences), key_topics (keywords), tone, language."""
 
         # Built-in function schema
         function_def = {
             "name": "analyze_text",
-            "description": "Analyze a text document and provide structured metadata",
+            "description": "Text analysis",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Brief summary of file content (1-2 sentences)"
+                        "description": "1-2 sentence summary"
                     },
                     "key_topics": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Array of keywords representing main topics"
+                        "description": "Topic keywords"
                     },
                     "tone": {
                         "type": "string",
-                        "description": "Writing tone (e.g., professional, casual, formal, academic, creative)"
+                        "description": "Writing tone"
                     },
                     "language": {
                         "type": "string",
-                        "description": "Primary language used (e.g., English, Spanish, etc.)"
+                        "description": "Primary language"
                     },
                 },
                 "required": ["summary", "key_topics", "tone", "language"]
@@ -838,76 +792,47 @@ async def parse_search_query(request: SearchQueryParseRequest):
         current_date = datetime.now(timezone.utc).isoformat()
         
         # Built-in prompt for search query parsing
-        prompt = f"""Parse this search query and extract semantic components for a content search system.
+        prompt = f"""Parse: "{request.query}" (Current: {current_date})
 
-Current date/time: {current_date}
+Extract:
+- search_query: core terms (no location/date)
+- location: specific place or null
+- search_radius: km based on specificity (determine appropriate radius based on location. more specific locations should have smaller radius) 
+- date: UTC range object or null
 
-Search query: "{request.query}"
-
-Extract and return:
-1. search_query: The core search terms (remove location/date filters)
-2. location: Specific location to geocode (university, landmark, city, etc.) or null
-3. date: Date range filter or null
-4. search_radius: Intelligent search radius in kilometers based on location specificity
-
-For dates:
-- Convert relative terms like "last 2 months", "past week", "yesterday" to UTC date ranges
-- Return as {{"start": "YYYY-MM-DDTHH:MM:SS.000000Z", "end": "YYYY-MM-DDTHH:MM:SS.000000Z"}}
-- If no date mentioned, return null
-
-For locations:
-- Extract specific places like "Brown University", "Central Park", "San Francisco"
-- Convert casual references like "brown" → "Brown University", "mit" → "MIT"
-- If no location mentioned, return null
-
-For search_radius (kilometers):
-- Specific buildings/addresses (Brown University, specific restaurant, exact venue): 2-3 km
-- Landmarks/attractions (Six Flags, Central Park, Golden Gate Bridge): 5-8 km
-- Neighborhoods/districts (Downtown Boston, Mission District, Cambridge): 8-15 km
-- Cities (Boston, San Francisco, Providence): 20-30 km
-- Metro areas (Greater Boston, Bay Area): 40-60 km
-- States/large regions (Massachusetts, Rhode Island): 80-120 km
-- Large states/countries (California, Texas): 150-300 km
-- If no location mentioned, return null
-
-Examples:
-- "exercise videos at brown within the last two months" → search_query: "exercise videos", location: "Brown University", search_radius: 3, date: {{start: "2025-04-20...", end: "2025-06-20..."}}
-- "photos from Boston" → search_query: "photos", location: "Boston", search_radius: 25, date: null
-- "videos in Massachusetts" → search_query: "videos", location: "Massachusetts", search_radius: 100, date: null
-- "machine learning papers" → search_query: "machine learning papers", location: null, search_radius: null, date: null
-
-Be precise with location names for geocoding accuracy."""
+Date examples: "last month" → {{"start": "2025-05-20T...", "end": "2025-06-20T..."}}
+Location examples: "brown" → "Brown University", "mit" → "MIT" """
 
         # Function definition for structured output
         function_def = {
             "name": "parse_search_components",
-            "description": "Parse search query into semantic components",
+            "description": "Parse search query",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "search_query": {
                         "type": "string",
-                        "description": "Core search terms with location and date filters removed"
+                        "description": "Core terms only"
                     },
                     "location": {
                         "type": ["string", "null"],
-                        "description": "Specific location to geocode (full name preferred) or null if none"
+                        "description": "Place name or null"
                     },
                     "search_radius": {
                         "type": ["number", "null"],
-                        "description": "Intelligent search radius in kilometers based on location specificity (2-3 for buildings, 20-30 for cities, 80-120 for states), or null if no location"
+                        "description": "Radius in km or null"
                     },
                     "date": {
                         "type": ["object", "null"],
-                        "description": "Date range filter with start and end UTC timestamps, or null if none",
+                        "description": "Date range or null",
                         "properties": {
                             "start": {
                                 "type": "string",
-                                "description": "Start date in UTC ISO format"
+                                "description": "Start UTC"
                             },
                             "end": {
                                 "type": "string", 
-                                "description": "End date in UTC ISO format"
+                                "description": "End UTC"
                             }
                         }
                     }
@@ -919,7 +844,7 @@ Be precise with location names for geocoding accuracy."""
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a search query parser that extracts semantic components for content filtering."},
+                {"role": "system", "content": "Parse search queries for filtering."},
                 {"role": "user", "content": prompt}
             ],
             tools=[{"type": "function", "function": function_def}],

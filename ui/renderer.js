@@ -149,7 +149,7 @@ class ContentCacheApp {
                         <div class="bucket-indicator" style="background: ${bucketColor}"></div>
                         <h3>${bucketName}</h3>
                         <span class="bucket-count">${bucketResults.length}</span>
-                    </div>
+                        </div>
                     <div class="cards-grid">
                         ${bucketCards}
                     </div>

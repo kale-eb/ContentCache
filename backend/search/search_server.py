@@ -11,6 +11,7 @@ import pickle
 import time
 import subprocess
 import signal
+import atexit
 from typing import Dict, List, Tuple, Any, Optional, Union
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -39,6 +40,31 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Global server instance for cleanup
+_server_instance = None
+
+def cleanup_resources():
+    """Clean up resources on shutdown"""
+    global _server_instance
+    if _server_instance:
+        try:
+            print("🧹 Cleaning up server resources...")
+            # Add any specific cleanup here
+            _server_instance = None
+            print("✅ Resource cleanup completed")
+        except Exception as e:
+            print(f"⚠️ Error during cleanup: {e}")
+
+def signal_handler(signum, frame):
+    """Handle termination signals gracefully"""
+    print(f"📡 Received signal {signum}, shutting down gracefully...")
+    cleanup_resources()
+    sys.exit(0)
+
+# Register cleanup handlers
+atexit.register(cleanup_resources)
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 def kill_processes_on_port(port):
     """Kill any existing processes running on the specified port."""
@@ -78,10 +104,14 @@ def kill_processes_on_port(port):
 
 class ContentCacheSearchServer:
     def __init__(self, port=5001, auto_sync=True):
+        global _server_instance
         self.port = port
         self.auto_sync = auto_sync
         self.app = Flask(__name__)
         CORS(self.app)
+        
+        # Register this instance for cleanup
+        _server_instance = self
         
         # Model and data storage
         self.sentence_model = None
@@ -120,27 +150,49 @@ class ContentCacheSearchServer:
         
         @self.app.route('/search', methods=['GET', 'POST'])
         def search():
-            """Main search endpoint with content type filtering."""
+            """Main search endpoint with content type filtering and optional bucketing."""
             try:
                 if request.method == 'GET':
                     query = request.args.get('q', '')
                     content_type = request.args.get('type', 'all')
                     top_k = int(request.args.get('top_k', 10))
+                    # New filtering parameters
+                    date_filter = request.args.get('date_filter', '')
+                    location_filter = request.args.get('location_filter', '')
                 else:
                     data = request.get_json() or {}
                     query = data.get('query', '')
                     content_type = data.get('type', 'all')
                     top_k = data.get('top_k', 10)
+                    # New filtering parameters
+                    date_filter = data.get('date_filter', '')
+                    location_filter = data.get('location_filter', '')
                 
                 if not query:
                     return jsonify({'error': 'No query provided'}), 400
                 
-                results = self._perform_search(query, content_type, top_k)
+                # Check if manual filters are provided
+                has_manual_filters = bool(date_filter.strip() or location_filter.strip())
+                
+                # Always try bucketing first to see if OpenAI parsing extracts filters
+                results = self._perform_search_with_buckets(query, content_type, top_k, date_filter, location_filter)
+                
+                # Check if bucketing actually found filters (either manual or AI-parsed)
+                has_buckets = 'buckets' in results and len(results['buckets']) > 0
+                
+                if not has_buckets:
+                    # No filters found - fall back to regular search
+                    flat_results = self._perform_search(query, content_type, top_k)
+                    results = {'results': flat_results}
+                
                 return jsonify({
                     'query': query,
                     'content_type': content_type,
-                    'results': results,
-                    'total_results': len(results)
+                    'date_filter': date_filter,
+                    'location_filter': location_filter,
+                    'has_buckets': has_buckets,
+                    **results,  # This will include 'results' or 'buckets' depending on the method
+                    'total_results': len(results.get('results', [])) if 'results' in results else sum(len(bucket) for bucket in results.get('buckets', {}).values())
                 })
                 
             except Exception as e:
@@ -247,10 +299,23 @@ class ContentCacheSearchServer:
         """Load the sentence transformer model."""
         try:
             print("📥 Loading SentenceTransformer model...")
+            
+            # Set device before loading to prevent multiprocessing issues
+            import torch
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+            
+            # Load with specific device and proper configuration
             self.sentence_model = SentenceTransformer(
                 'all-MiniLM-L6-v2',
-                cache_folder=self.model_cache_dir
+                cache_folder=self.model_cache_dir,
+                device=device
             )
+            
             print("✅ SentenceTransformer model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load SentenceTransformer: {e}")
@@ -555,6 +620,366 @@ class ContentCacheSearchServer:
         # Return top results
         return semantic_results[:top_k]
     
+    def _perform_search_with_buckets(self, query: str, content_type: str = 'all', top_k: int = 20, 
+                                   date_filter: str = '', location_filter: str = '') -> Dict[str, Any]:
+        """Perform search and return results organized in buckets based on date/location filters."""
+        
+        # Parse the query using OpenAI to extract semantic components (like _perform_search does)
+        parsed_location = None
+        search_radius = None
+        parsed_date = None
+        
+        try:
+            try:
+                from backend.processing.api_client import get_api_client
+            except ImportError:
+                from api_client import get_api_client
+            client = get_api_client()
+            parse_result = client.parse_search_query(query)
+            
+            parsed = parse_result.get('parsed', {})
+            parsed_location = parsed.get('location')
+            search_radius = parsed.get('search_radius')
+            parsed_date = parsed.get('date')
+            
+            print(f"🧠 Query parsed for bucketing - Location: {parsed_location}, Radius: {search_radius}km, Date: {parsed_date}")
+            
+        except Exception as e:
+            print(f"⚠️ Query parsing failed for bucketing, using manual filters: {e}")
+        
+        # Use parsed location/date if available, otherwise fall back to manual filters
+        effective_location = parsed_location or (location_filter.strip() if location_filter.strip() else None)
+        effective_date = parsed_date or (date_filter.strip() if date_filter.strip() else None)
+        
+        print(f"🔍 Effective filters - Location: '{effective_location}', Date: '{effective_date}'")
+        
+        # First get all semantic search results (without applying filters)
+        all_results = self._perform_search_no_filters(query, content_type, top_k * 3)  # Get more to fill buckets
+        
+        has_date_filter = bool(effective_date)
+        has_location_filter = bool(effective_location)
+        
+        if not has_date_filter and not has_location_filter:
+            # No filters - return empty buckets so main search route can fall back to regular search
+            return {'buckets': {}}
+        
+        # Forward geocode location if we have one
+        location_coordinates = None
+        if has_location_filter:
+            try:
+                location_coordinates = location_search.forward_geocode(effective_location)
+                if location_coordinates:
+                    print(f"📍 Geocoded '{effective_location}' to {location_coordinates}")
+                else:
+                    print(f"⚠️ Could not geocode '{effective_location}'")
+            except Exception as e:
+                print(f"⚠️ Geocoding error: {e}")
+        
+        # Initialize buckets
+        buckets = {}
+        
+        if has_date_filter and has_location_filter:
+            # Both filters - create 4 buckets
+            buckets = {
+                "📅📍 Date & Location Match": [],
+                "📅 Date Match Only": [],
+                "📍 Location Match Only": [],
+                "📄 Other Results": []
+            }
+            
+            for result in all_results:
+                date_match = self._check_date_match_parsed(result, effective_date)
+                location_match = self._check_location_match_geocoded(result, effective_location, location_coordinates, search_radius)
+                
+                if date_match and location_match:
+                    buckets["📅📍 Date & Location Match"].append(result)
+                elif date_match:
+                    buckets["📅 Date Match Only"].append(result)
+                elif location_match:
+                    buckets["📍 Location Match Only"].append(result)
+                else:
+                    buckets["📄 Other Results"].append(result)
+                    
+        elif has_date_filter:
+            # Only date filter - create 2 buckets
+            buckets = {
+                "📅 Date Match": [],
+                "📄 Other Results": []
+            }
+            
+            for result in all_results:
+                date_match = self._check_date_match_parsed(result, effective_date)
+                if date_match:
+                    buckets["📅 Date Match"].append(result)
+                else:
+                    buckets["📄 Other Results"].append(result)
+                    
+        elif has_location_filter:
+            # Only location filter - create 2 buckets
+            buckets = {
+                "📍 Location Match": [],
+                "📄 Other Results": []
+            }
+            
+            for result in all_results:
+                location_match = self._check_location_match_geocoded(result, effective_location, location_coordinates, search_radius)
+                if location_match:
+                    buckets["📍 Location Match"].append(result)
+                else:
+                    buckets["📄 Other Results"].append(result)
+        
+        # Remove empty buckets and limit results per bucket
+        final_buckets = {}
+        max_per_bucket = max(8, top_k // len([k for k, v in buckets.items() if v]))  # At least 8 per bucket
+        
+        for bucket_name, bucket_results in buckets.items():
+            if bucket_results:  # Only include non-empty buckets
+                # Sort by similarity score and limit
+                bucket_results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+                final_buckets[bucket_name] = bucket_results[:max_per_bucket]
+        
+        return {'buckets': final_buckets}
+    
+    def _perform_search_no_filters(self, query: str, content_type: str = 'all', top_k: int = 20) -> List[Dict]:
+        """Perform semantic search without applying any location/date filters."""
+        if not self.sentence_model:
+            raise RuntimeError("SentenceTransformer model not loaded")
+        
+        # Parse the query to extract core search terms (without location/date)
+        core_query = query  # Default fallback
+        try:
+            try:
+                from backend.processing.api_client import get_api_client
+            except ImportError:
+                from api_client import get_api_client
+            client = get_api_client()
+            parse_result = client.parse_search_query(query)
+            
+            parsed = parse_result.get('parsed', {})
+            core_query = parsed.get('search_query', query)
+            
+            print(f"🔍 Core query for embedding search: '{core_query}' (from original: '{query}')")
+            
+        except Exception as e:
+            print(f"⚠️ Query parsing failed in no_filters, using original query: {e}")
+        
+        # Just do semantic search without any filtering
+        search_types = ['video', 'text', 'audio', 'image'] if content_type == 'all' else [content_type]
+        
+        # Collect all embeddings to search
+        all_embeddings = {}
+        for ctype in search_types:
+            all_embeddings.update({
+                f"{ctype}:{path}": embedding 
+                for path, embedding in self.content_embeddings[ctype].items()
+            })
+        
+        semantic_results = []
+        if all_embeddings:
+            # Encode the core search query (without location/date terms)
+            query_embedding = self.sentence_model.encode([core_query])
+            
+            # Calculate similarities
+            similarities = []
+            for type_path, embedding in all_embeddings.items():
+                if embedding is not None:
+                    # Handle different embedding formats
+                    if isinstance(embedding, list):
+                        embedding = np.array(embedding)
+                    
+                    # Calculate cosine similarity
+                    similarity = util.pytorch_cos_sim(query_embedding, embedding).item()
+                    similarities.append((type_path, similarity))
+            
+            # Filter by similarity threshold (0.25) and sort
+            filtered_similarities = [(tp, sim) for tp, sim in similarities if sim >= 0.25]
+            filtered_similarities.sort(key=lambda x: x[1], reverse=True)
+            
+            # Format semantic results
+            for type_path, similarity in filtered_similarities:
+                # Parse content type and path
+                ctype, file_path = type_path.split(':', 1)
+                
+                result = {
+                    'type': ctype,
+                    'content_type': ctype,
+                    'file_path': file_path,
+                    'filename': os.path.basename(file_path),
+                    'score': round(similarity, 4),
+                    'similarity_score': round(similarity, 4),
+                    'search_type': 'semantic'
+                }
+                
+                # Add metadata from content metadata
+                if file_path in self.content_metadata[ctype]:
+                    metadata = self.content_metadata[ctype][file_path]
+                    
+                    # Add content-specific metadata
+                    if ctype == 'video':
+                        summary = metadata.get('video_summary', '')
+                        result['summary'] = summary[:200] + '...' if len(summary) > 200 else summary
+                        result['content'] = result['summary']
+                        result['tags'] = metadata.get('tags', {})
+                    elif ctype == 'text':
+                        summary = metadata.get('analysis', {}).get('summary', '')
+                        result['summary'] = summary
+                        result['content'] = summary
+                        result['file_type'] = metadata.get('file_type', '')
+                    elif ctype in ['image', 'audio']:
+                        analysis = metadata.get('analysis', '')
+                        result['summary'] = analysis[:200] + '...' if len(analysis) > 200 else analysis
+                        result['content'] = result['summary']
+                
+                semantic_results.append(result)
+        
+        return semantic_results[:top_k]
+    
+    def _check_date_match(self, result: Dict, date_filter: str) -> bool:
+        """Check if a result matches the date filter."""
+        if not date_filter.strip():
+            return False
+            
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Get date from metadata or filename
+            date_recorded = metadata.get('metadata', {}).get('date_recorded')
+            if date_recorded and date_recorded != 'None':
+                return date_filter in date_recorded
+            
+            # Try extracting date from filename
+            import re
+            date_match = re.search(r'(\d{4})[_-]?(\d{2})[_-]?(\d{2})', file_path)
+            if date_match:
+                file_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+                return date_filter in file_date
+        
+        return False
+    
+    def _check_location_match(self, result: Dict, location_filter: str) -> bool:
+        """Check if a result matches the location filter (legacy string matching)."""
+        if not location_filter.strip():
+            return False
+            
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Check location in metadata
+            location_data = metadata.get('metadata', {}).get('location')
+            if not location_data or location_data == 'None':
+                # For images, check the 'coordinates' field as well
+                location_data = metadata.get('coordinates')
+            
+            # Check if location_filter appears in location text
+            if isinstance(location_data, str) and location_data not in ['None', '']:
+                return location_filter.lower() in location_data.lower()
+            elif isinstance(location_data, dict):
+                # Check if it's a place name or coordinates
+                location_text = str(location_data)
+                return location_filter.lower() in location_text.lower()
+        
+        return False
+    
+    def _check_location_match_geocoded(self, result: Dict, location_filter: str, target_coordinates: Optional[tuple], search_radius: Optional[float]) -> bool:
+        """Check if a result matches the location filter using forward geocoding and radius."""
+        if not location_filter or not target_coordinates:
+            return False
+            
+        target_lat, target_lon = target_coordinates
+        radius_km = search_radius if search_radius is not None else 50.0
+        
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Check location in metadata
+            location_data = metadata.get('metadata', {}).get('location')
+            if not location_data or location_data == 'None':
+                # For images, check the 'coordinates' field as well
+                location_data = metadata.get('coordinates')
+            
+            # Handle multiple location formats
+            content_coords = None
+            
+            if isinstance(location_data, dict) and location_data.get('type') == 'coordinates':
+                # Legacy nested format (videos)
+                content_coords = (location_data.get('latitude'), location_data.get('longitude'))
+            elif isinstance(location_data, dict) and 'latitude' in location_data and 'longitude' in location_data:
+                # Image coordinates format: {'latitude': lat, 'longitude': lon}
+                content_coords = (location_data.get('latitude'), location_data.get('longitude'))
+            elif isinstance(location_data, str) and location_data not in ['None', '']:
+                # String format - could be coordinates "lat, lon" or place name
+                import re
+                coord_pattern = r'([+-]?\d+\.?\d*)[,\s]+([+-]?\d+\.?\d*)'
+                match = re.search(coord_pattern, location_data)
+                
+                if match:
+                    # Found coordinate string like "37.7749, -122.4194"
+                    try:
+                        lat, lon = float(match.group(1)), float(match.group(2))
+                        if -90 <= lat <= 90 and -180 <= lon <= 180:
+                            content_coords = (lat, lon)
+                        else:
+                            print(f"⚠️ Invalid coordinate ranges in string: {lat}, {lon}")
+                    except ValueError:
+                        pass
+                
+                # If not coordinates, treat as place name text (fallback to string matching)
+                if not content_coords:
+                    return location_filter.lower() in location_data.lower()
+            
+            if content_coords and content_coords[0] is not None and content_coords[1] is not None:
+                # Calculate distance
+                distance = location_search.calculate_distance(
+                    target_lat, target_lon, content_coords[0], content_coords[1]
+                )
+                
+                # Include if within radius
+                return distance <= radius_km
+        
+        return False
+    
+    def _check_date_match_parsed(self, result: Dict, date_filter) -> bool:
+        """Check if a result matches the parsed date filter."""
+        if not date_filter:
+            return False
+        
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Get date from metadata
+            date_recorded_str = metadata.get('metadata', {}).get('date_recorded')
+            if date_recorded_str and date_recorded_str != 'None':
+                try:
+                    from datetime import datetime
+                    date_recorded = datetime.fromisoformat(date_recorded_str.replace('Z', '+00:00'))
+                    
+                    # Handle different date filter formats
+                    if isinstance(date_filter, dict) and 'start' in date_filter and 'end' in date_filter:
+                        # Parsed date range from OpenAI
+                        start_date = datetime.fromisoformat(date_filter['start'].replace('Z', '+00:00'))
+                        end_date = datetime.fromisoformat(date_filter['end'].replace('Z', '+00:00'))
+                        return start_date <= date_recorded <= end_date
+                    elif isinstance(date_filter, str):
+                        # Simple string matching (fallback)
+                        return date_filter in date_recorded_str
+                    
+                except ValueError:
+                    pass
+        
+        return False
+    
     def _apply_location_filter(self, results: List[Dict], location_text: str, search_radius: Optional[float] = None) -> List[Dict]:
         """Apply location filtering to search results with dynamic radius."""
         # Use intelligent radius or fallback to 50km
@@ -615,10 +1040,10 @@ class ContentCacheSearchServer:
                     # If not coordinates, treat as place name text
                     if not content_coords:
                         print(f"📍 Found text location: {location_data}")
-                        result['location_match'] = 'text_based'
-                        result['location_text'] = location_data
-                        location_filtered.append(result)
-                        continue
+                    result['location_match'] = 'text_based'
+                    result['location_text'] = location_data
+                    location_filtered.append(result)
+                    continue
                 
                 if content_coords and content_coords[0] is not None and content_coords[1] is not None:
                     # Calculate distance

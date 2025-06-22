@@ -590,12 +590,6 @@ def cleanup_all_models():
         # Look for ImageProcessor instances in memory
         for obj_name in dir(sys.modules.get('imageprocessor', {})):
             obj = getattr(imageprocessor, obj_name, None)
-            if hasattr(obj, 'clip_model'):
-                del obj.clip_model
-                models_cleaned.append("CLIP model")
-            if hasattr(obj, 'vit_model'):
-                del obj.vit_model
-                models_cleaned.append("ViT model")
             if hasattr(obj, 'object_detector'):
                 del obj.object_detector
                 models_cleaned.append("Object detector")
