@@ -1,0 +1,5 @@
+[build]
+root = "api"
+
+[deploy]
+startCommand = "python main.py" 
