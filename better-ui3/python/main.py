@@ -13,6 +13,7 @@ class ElectronBridge:
     def __init__(self):
         # Create the unified service with progress callback
         self.service = ContentCacheService(progress_callback=self.progress_callback)
+        self.processing_stopped = False
         self.send_output("ContentCache service initialized")
     
     def progress_callback(self, stage: str, progress: float, message: str):
@@ -28,10 +29,12 @@ class ElectronBridge:
     def send_output(self, message: str):
         """Send plain text output to Electron"""
         print(f"OUTPUT: {message}", flush=True)
+        sys.stdout.flush()
     
     def send_json_response(self, data: dict):
         """Send JSON response to Electron"""
         print(json.dumps(data), flush=True)
+        sys.stdout.flush()
     
     def send_ai_response(self, message: str):
         """Send AI chat response to Electron"""
@@ -43,12 +46,26 @@ class ElectronBridge:
     
     def process_files(self, file_paths: list):
         """Process multiple files using the unified service"""
+        self.send_output(f"DEBUG: process_files called with: {file_paths}, type: {type(file_paths)}")
+        
+        if not file_paths:
+            self.send_output("ERROR: No files provided to process_files")
+            return []
+            
         results = []
         total_files = len(file_paths)
+        self.processing_stopped = False  # Reset stop flag
         
         self.send_output(f"Starting to process {total_files} file(s)")
         
         for i, file_path in enumerate(file_paths):
+            self.send_output(f"DEBUG: Processing file {i+1}/{total_files}: {file_path} (type: {type(file_path)})")
+            
+            # Check if processing should stop
+            if self.processing_stopped:
+                self.send_output("Processing stopped by user")
+                break
+                
             try:
                 if os.path.isdir(file_path):
                     # Process directory
@@ -81,11 +98,13 @@ class ElectronBridge:
                 self.send_output(f"Error processing {file_path}: {str(e)}")
         
         # Send final results
+        final_status = "stopped" if self.processing_stopped else "complete"
         self.send_json_response({
             "type": "processing_complete",
             "results": results,
             "total_processed": len(results),
-            "successful": len([r for r in results if r.get('success', False)])
+            "successful": len([r for r in results if r.get('success', False)]),
+            "status": final_status
         })
         
         return results
@@ -237,6 +256,7 @@ def main():
             
             if action == 'process':
                 files = command.get('files', [])
+                bridge.send_output(f"DEBUG: Received files: {files}, type: {type(files)}")
                 bridge.process_files(files)
                 
             elif action == 'search':
@@ -254,6 +274,10 @@ def main():
                 
             elif action == 'status':
                 bridge.get_system_status()
+                
+            elif action == 'stop':
+                bridge.processing_stopped = True
+                bridge.send_output("Processing stopped")
                 
             else:
                 bridge.send_output(f"Unknown action: {action}")

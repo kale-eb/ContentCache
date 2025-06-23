@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Upload, File, FolderOpen, AlertCircle, CheckCircle, Clock, X } from "lucide-react"
+import { Upload, File, FolderOpen, AlertCircle, CheckCircle, Clock, X, StopCircle, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -24,9 +24,12 @@ export function UploadTab() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentProgress, setCurrentProgress] = useState(0)
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [processingStatus, setProcessingStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle')
+  const [processingStatus, setProcessingStatus] = useState<'idle' | 'processing' | 'success' | 'error' | 'stopped'>('idle')
   const logEndRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
+  
+  // Counter to ensure unique log IDs
+  const logCounterRef = useRef(0)
 
   // Auto-scroll to bottom when new logs are added
   useEffect(() => {
@@ -35,7 +38,7 @@ export function UploadTab() {
 
   const addLog = (type: LogEntry['type'], message: string, progress?: number, stage?: string) => {
     const newLog: LogEntry = {
-      id: Date.now().toString(),
+      id: `${Date.now()}-${++logCounterRef.current}`,
       timestamp: new Date().toLocaleTimeString(),
       type,
       message,
@@ -213,6 +216,82 @@ export function UploadTab() {
     }
   }
 
+  const stopProcessing = async () => {
+    if (window.electronAPI && window.electronAPI.stopProcessing) {
+      try {
+        await window.electronAPI.stopProcessing()
+        setIsProcessing(false)
+        setProcessingStatus('stopped')
+        addLog('info', 'Processing stopped by user')
+        toast({
+          title: "Processing Stopped",
+          description: "File processing has been stopped",
+        })
+      } catch (error) {
+        addLog('error', `Failed to stop processing: ${error}`)
+        toast({
+          title: "Error",
+          description: "Failed to stop processing",
+          variant: "destructive",
+        })
+      }
+    }
+  }
+
+  // Debug function to show metadata paths
+  const showMetadataPaths = async () => {
+    if (window.electronAPI) {
+      try {
+        // Request metadata paths from main process using generic invoke
+        const paths = await (window.electronAPI as any).getMetadataPaths()
+        addLog('info', `📁 Metadata Paths:`)
+        addLog('info', `Video: ${paths.video}`)
+        addLog('info', `Audio: ${paths.audio}`)
+        addLog('info', `Text: ${paths.text}`)
+        addLog('info', `Image: ${paths.image}`)
+        toast({
+          title: "Metadata Paths",
+          description: "Check logs for full paths",
+        })
+      } catch (error) {
+        addLog('error', `Failed to get metadata paths: ${error}`)
+      }
+    }
+  }
+
+  // Test API connectivity function
+  const testApiConnectivity = async () => {
+    if (window.electronAPI) {
+      try {
+        addLog('info', '🧪 Testing API connectivity...')
+        // Use the generic process file function to run the API test
+        const result = await (window.electronAPI as any).testApiConnectivity()
+        if (result.status === 'success') {
+          addLog('success', `✅ API Test Passed: ${result.message}`)
+          addLog('info', `🌐 API URL: ${result.api_url}`)
+          toast({
+            title: "API Test Success",
+            description: "Railway API server is accessible and working",
+          })
+        } else {
+          addLog('error', `❌ API Test Failed: ${result.message}`)
+          toast({
+            title: "API Test Failed",
+            description: "Check logs for details",
+            variant: "destructive",
+          })
+        }
+      } catch (error) {
+        addLog('error', `Failed to test API: ${error}`)
+        toast({
+          title: "API Test Error",
+          description: "Failed to run API test",
+          variant: "destructive",
+        })
+      }
+    }
+  }
+
   return (
     <div className="flex-1 space-y-6 p-8">
       {/* Header */}
@@ -235,15 +314,16 @@ export function UploadTab() {
                   <h3 className="text-xl font-semibold text-gray-900 mb-2">Upload Files</h3>
                   <p className="text-gray-600 mb-4">Select individual files or entire folders for processing</p>
                 </div>
-                <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <div className="flex flex-col sm:flex-row gap-4">
                   <Button
+                    variant="outline"
                     size="lg"
-                    className="bg-blue-600 hover:bg-blue-700 px-8 py-3 text-base font-medium"
+                    className="px-8 py-3 text-base font-medium border-blue-200 hover:bg-blue-50"
                     onClick={handleSelectFiles}
                     disabled={isProcessing}
                   >
-                    <File className="w-5 h-5 mr-2" />
-                    {isProcessing ? "Processing..." : "Select Files"}
+                    <FileText className="w-5 h-5 mr-2" />
+                    Select Files
                   </Button>
                   <Button
                     variant="outline"
@@ -256,7 +336,27 @@ export function UploadTab() {
                     Select Folder
                   </Button>
                 </div>
-                <p className="text-sm text-gray-500">Supports: MP4, MOV, AVI, MKV, MP3, WAV, JPG, PNG, PDF, TXT, and more</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="px-3 py-2 text-xs border-gray-300 hover:bg-gray-50"
+                    onClick={showMetadataPaths}
+                    title="Debug: Show metadata file paths"
+                  >
+                    🐛 Paths
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="px-3 py-2 text-xs border-blue-300 hover:bg-blue-50"
+                    onClick={testApiConnectivity}
+                    title="Test Railway API connectivity"
+                  >
+                    🧪 API
+                  </Button>
+                </div>
+                <p className="text-sm text-gray-500">Supports: Videos (MP4, MOV, AVI, MKV), Audio (MP3, WAV, AAC, FLAC), Images (JPG, PNG, HEIC), Text (TXT, PDF, MD)</p>
               </div>
             </CardContent>
           </Card>
@@ -271,19 +371,32 @@ export function UploadTab() {
                     <CardTitle className="text-lg">Processing Status</CardTitle>
                   </div>
                   <Badge variant={processingStatus === 'success' ? 'default' : processingStatus === 'error' ? 'destructive' : 'secondary'}>
-                    {processingStatus === 'processing' ? 'In Progress' : processingStatus === 'success' ? 'Complete' : processingStatus === 'error' ? 'Error' : 'Ready'}
+                    {processingStatus === 'processing' ? 'In Progress' : processingStatus === 'success' ? 'Complete' : processingStatus === 'error' ? 'Error' : processingStatus === 'stopped' ? 'Stopped' : 'Ready'}
                   </Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 {isProcessing && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span>Progress</span>
-                      <span>{currentProgress.toFixed(1)}%</span>
+                  <>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span>Progress</span>
+                        <span>{currentProgress.toFixed(1)}%</span>
+                      </div>
+                      <Progress value={currentProgress} className="w-full" />
                     </div>
-                    <Progress value={currentProgress} className="w-full" />
-                  </div>
+                    <div className="flex justify-center">
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={stopProcessing}
+                        className="flex items-center gap-2"
+                      >
+                        <StopCircle className="w-4 h-4" />
+                        Stop Processing
+                      </Button>
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>

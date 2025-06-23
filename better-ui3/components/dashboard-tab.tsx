@@ -122,6 +122,7 @@ declare global {
       selectFiles: () => Promise<void>
       selectFolder: () => Promise<void>
       processFiles: (filePaths: string[]) => Promise<{ success: boolean }>
+      stopProcessing: () => Promise<void>
       searchVideos: (query: string, options?: { 
         content_types?: string[]
         date_filter?: string
@@ -152,6 +153,7 @@ export function DashboardTab() {
   const [isSearching, setIsSearching] = useState(false)
   const [hasSearched, setHasSearched] = useState(false)
   const [searchTimeout, setSearchTimeout] = useState<NodeJS.Timeout | null>(null)
+  const [isSearchInProgress, setIsSearchInProgress] = useState(false)
   
   // New filter states
   const [dateFilter, setDateFilter] = useState("")
@@ -398,7 +400,6 @@ export function DashboardTab() {
     }
   }
 
-  const [isSearchInProgress, setIsSearchInProgress] = useState(false)
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [draggedItem, setDraggedItem] = useState<any>(null)
 

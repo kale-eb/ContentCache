@@ -25,21 +25,24 @@ sys.path.append(backend_processing_dir)
 
 # Import existing processing functions
 try:
-    from backend.processing.videotagger import tag_video
-    from backend.processing.imageprocessor import tag_image
-    from backend.processing.textprocessor import TextProcessor
-    from backend.processing.audioanalyzer import analyze_audio_with_openai
-    from backend.processing.tagdirectory import batch_process_files
+    from videotagger import tag_video_smart_conflict_resolution
+    from imageprocessor import tag_image
+    from textprocessor import TextProcessor
+    from audioanalyzer import analyze_audio_with_openai, save_audio_metadata
+    from tagdirectory import batch_process_files
+    from config import get_audio_metadata_path
 except ImportError as e:
     print(f"Warning: Could not import backend modules: {e}")
     print(f"Please ensure the backend/processing directory exists and modules are available")
     # Provide fallback empty functions
-    def tag_video(file_path): return {"error": "Backend not available"}
+    def tag_video_smart_conflict_resolution(file_path, **kwargs): return {"error": "Backend not available"}
     def tag_image(file_path): return {"error": "Backend not available"}
     class TextProcessor:
         def process_file(self, file_path): return {"error": "Backend not available"}
     def analyze_audio_with_openai(file_path): return {"error": "Backend not available"}
+    def save_audio_metadata(file_path, result, metadata_file): pass
     def batch_process_files(directory_path): return {"error": "Backend not available"}
+    def get_audio_metadata_path(): return "audio_metadata.json"
 
 class ContentCacheService:
     """
@@ -110,13 +113,27 @@ class ContentCacheService:
         
         file_type = self.detect_file_type(file_path)
         filename = os.path.basename(file_path)
+        abs_path = os.path.abspath(file_path)
         
         self._emit_progress("detection", 10, f"Detected {file_type} file: {filename}")
+        
+        # Check if file is already processed
+        if self._is_file_already_processed(abs_path, file_type):
+            self._emit_progress("complete", 100, f"File already processed, skipping: {filename}")
+            return {
+                "type": file_type,
+                "file_path": file_path,
+                "filename": filename,
+                "processed_at": "already_processed",
+                "result": "File already exists in metadata",
+                "success": True,
+                "skipped": True
+            }
         
         try:
             if file_type == 'video':
                 self._emit_progress("processing", 50, f"Processing video: {filename}")
-                result = tag_video(file_path)
+                result = tag_video_smart_conflict_resolution(file_path)
                 
             elif file_type == 'image':
                 self._emit_progress("processing", 50, f"Processing image: {filename}")
@@ -129,6 +146,8 @@ class ContentCacheService:
             elif file_type == 'audio':
                 self._emit_progress("processing", 50, f"Processing audio: {filename}")
                 result = analyze_audio_with_openai(file_path)
+                # Save metadata to ensure it persists
+                save_audio_metadata(file_path, result, get_audio_metadata_path())
                 
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")
@@ -145,6 +164,8 @@ class ContentCacheService:
             }
                 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._emit_progress("error", 0, f"Processing failed: {str(e)}")
             return {
                 "type": file_type,
@@ -154,6 +175,47 @@ class ContentCacheService:
                 "error": str(e),
                 "success": False
             }
+    
+    def _is_file_already_processed(self, abs_path: str, file_type: str) -> bool:
+        """
+        Check if a file has already been processed by checking the appropriate metadata file.
+        
+        Args:
+            abs_path: Absolute path to the file
+            file_type: Type of file (video, image, text, audio)
+            
+        Returns:
+            True if file is already processed, False otherwise
+        """
+        try:
+            # Import path functions as needed
+            from config import (
+                get_video_metadata_path, get_audio_metadata_path, 
+                get_text_metadata_path, get_image_metadata_path
+            )
+            
+            metadata_file = None
+            if file_type == 'video':
+                metadata_file = get_video_metadata_path()
+            elif file_type == 'audio':
+                metadata_file = get_audio_metadata_path()
+            elif file_type == 'text':
+                metadata_file = get_text_metadata_path()
+            elif file_type == 'image':
+                metadata_file = get_image_metadata_path()
+            
+            if metadata_file and os.path.exists(metadata_file):
+                import json
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                return abs_path in metadata
+            
+            return False
+            
+        except Exception as e:
+            # If we can't check metadata, proceed with processing
+            print(f"Warning: Could not check metadata for {abs_path}: {e}")
+            return False
     
     def process_directory(self, directory_path: str, recursive: bool = True, **options) -> Dict[str, Any]:
         """

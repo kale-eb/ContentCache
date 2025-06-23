@@ -1,0 +1,49 @@
+# FastAPI and server dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Core API dependencies
+requests==2.31.0
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# Image and video processing
+pillow==10.4.0
+opencv-python==4.8.1.78
+scikit-image==0.22.0
+natsort==8.4.0
+
+# OCR and text processing
+easyocr==1.7.0
+
+# Machine learning and embeddings
+sentence-transformers==2.2.2
+torch>=2.0.0
+numpy>=1.24.0
+transformers>=4.6.0
+
+# Audio processing dependencies - CORRECTED
+openai-whisper>=20231117
+torchaudio
+tensorflow>=2.10.0
+tensorflow-hub
+soundfile
+PyYAML
+
+# System monitoring
+psutil==5.9.5
+
+# Moondream for image captioning
+moondream==0.1.0
+
+# Search functionality
+rank_bm25==0.2.2
+
+# Flask for search server
+flask>=2.0.0
+flask-cors>=3.0.0
+
+# NOTE: OpenAI dependency removed - packaged app uses Railway API for all AI calls
+# Standard library imports (no installation needed)
+# os, base64, io, json, logging, pathlib, typing 

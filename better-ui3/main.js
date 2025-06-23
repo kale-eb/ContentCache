@@ -179,8 +179,11 @@ async function handleFileImport() {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openFile", "multiSelections"],
     filters: [
-      { name: "Video Files", extensions: ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"] },
-      { name: "Audio Files", extensions: ["mp3", "wav", "aac", "flac", "m4a"] },
+      { name: "Video Files", extensions: ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm", "m4v"] },
+      { name: "Audio Files", extensions: ["mp3", "wav", "aac", "flac", "m4a", "ogg"] },
+      { name: "Image Files", extensions: ["jpg", "jpeg", "png", "bmp", "tiff", "webp", "heic"] },
+      { name: "Text Files", extensions: ["txt", "md", "pdf", "docx", "rtf"] },
+      { name: "All Supported Files", extensions: ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm", "m4v", "mp3", "wav", "aac", "flac", "m4a", "ogg", "jpg", "jpeg", "png", "bmp", "tiff", "webp", "heic", "txt", "md", "pdf", "docx", "rtf"] },
       { name: "All Files", extensions: ["*"] },
     ],
   })
@@ -237,8 +240,20 @@ function startPythonProcess() {
   try {
     // Use the unified service main.py with virtual environment
     const venvPython = path.join(__dirname, "..", ".venv", "bin", "python")
+    
     pythonProcess = spawn(venvPython, [path.join(__dirname, "python", "main.py")], {
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    })
+
+    // Add error handler for spawn failure
+    pythonProcess.on("error", (error) => {
+      console.error("Python process spawn error:", error)
+    })
+
+    // Add handler for process exit
+    pythonProcess.on("exit", (code, signal) => {
+      console.log(`Python process exited with code ${code}, signal ${signal}`)
     })
 
     let pythonOutputBuffer = ''
@@ -267,10 +282,16 @@ function startPythonProcess() {
       console.log(`Python process exited with code ${code}`)
     })
 
-    // Send initial status request
+    // Send initial status request with better error handling
     setTimeout(() => {
-      if (pythonProcess) {
-        pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
+      if (pythonProcess && pythonProcess.stdin && !pythonProcess.killed) {
+        try {
+          pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
+        } catch (error) {
+          console.error("Error writing initial status to Python stdin:", error)
+        }
+      } else {
+        console.error("Python process not available for initial status request")
       }
     }, 1000)
   } catch (error) {
@@ -280,13 +301,20 @@ function startPythonProcess() {
 
 // Enhanced IPC handlers
 ipcMain.handle("process-files", async (event, filePaths) => {
-  if (pythonProcess) {
-    pythonProcess.stdin.write(
-      JSON.stringify({
-        action: "process",
-        files: filePaths,
-      }) + "\n",
-    )
+  if (pythonProcess && pythonProcess.stdin && !pythonProcess.killed) {
+    const command = {
+      action: "process",
+      files: filePaths,
+    }
+    try {
+      pythonProcess.stdin.write(JSON.stringify(command) + "\n")
+    } catch (error) {
+      console.error("Error writing to Python stdin:", error)
+      return { success: false, error: "Failed to send command to Python process" }
+    }
+  } else {
+    console.error("Python process not available for processing")
+    return { success: false, error: "Python process not available" }
   }
   return { success: true }
 })
@@ -311,6 +339,14 @@ ipcMain.handle("search-videos", async (event, query, options = {}) => {
 ipcMain.handle("get-system-status", async (event) => {
   if (pythonProcess) {
     pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
+  }
+  return { success: true }
+})
+
+// Stop processing handler
+ipcMain.handle("stop-processing", async (event) => {
+  if (pythonProcess) {
+    pythonProcess.stdin.write(JSON.stringify({ action: "stop" }) + "\n")
   }
   return { success: true }
 })
@@ -464,6 +500,137 @@ function generateSimpleThumbnail(contentType) {
 ipcMain.handle("select-files", handleFileImport)
 ipcMain.handle("select-folder", handleFolderImport)
 
+// Debug IPC handler for getting metadata paths
+ipcMain.handle("get-metadata-paths", async (event) => {
+  console.log("Debug: Getting metadata paths")
+  
+  try {
+    // For development mode, use project directory; for packaged, use Application Support
+    const os = require("os")
+    let baseDir
+    
+    if (!app.isPackaged) {
+      // Development mode - use project cache directory
+      baseDir = path.join(__dirname, "..", ".contentcache")
+    } else {
+      // Packaged mode - use Application Support
+      if (process.platform === 'darwin') {  // macOS
+        baseDir = path.join(os.homedir(), 'Library', 'Application Support', 'silk.ai')
+      } else if (process.platform === 'win32') {  // Windows  
+        baseDir = path.join(process.env.APPDATA || os.homedir(), 'silk.ai')
+      } else {  // Linux and others
+        baseDir = path.join(os.homedir(), '.config', 'silk.ai')
+      }
+    }
+    
+    const metadataDir = path.join(baseDir, 'metadata')
+    
+    const paths = {
+      video: path.join(metadataDir, 'video_metadata.json'),
+      audio: path.join(metadataDir, 'audio_metadata.json'),
+      text: path.join(metadataDir, 'text_metadata.json'),
+      image: path.join(metadataDir, 'image_metadata.json')
+    }
+    
+    console.log("Debug: Metadata paths constructed:", paths)
+    return paths
+    
+  } catch (error) {
+    console.error("Failed to get metadata paths:", error)
+    return {
+      error: error.message,
+      video: "Error loading path",
+      audio: "Error loading path", 
+      text: "Error loading path",
+      image: "Error loading path"
+    }
+  }
+})
+
+// Test API connectivity handler
+ipcMain.handle("test-api-connectivity", async (event) => {
+  console.log("Testing API connectivity...")
+  
+  try {
+    // Simple direct test of the Railway API using Node.js
+    const https = require('https')
+    
+    const railwayUrl = 'https://contentcache-production.up.railway.app/health'
+    
+    const result = await new Promise((resolve, reject) => {
+      console.log(`Testing Railway API at: ${railwayUrl}`)
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Request timeout (30 seconds)'))
+      }, 30000)
+      
+      const req = https.get(railwayUrl, (res) => {
+        clearTimeout(timeout)
+        
+        let data = ''
+        res.on('data', (chunk) => {
+          data += chunk
+        })
+        
+        res.on('end', () => {
+          console.log(`API Response Status: ${res.statusCode}`)
+          console.log(`API Response Data: ${data}`)
+          
+          if (res.statusCode === 200) {
+            try {
+              const responseData = JSON.parse(data)
+              resolve({
+                status: "success",
+                message: "Railway API server is accessible and working",
+                api_url: railwayUrl,
+                health: responseData
+              })
+            } catch (parseError) {
+              resolve({
+                status: "success", 
+                message: "Railway API server responded but with non-JSON data",
+                api_url: railwayUrl,
+                response: data
+              })
+            }
+          } else {
+            resolve({
+              status: "error",
+              message: `Railway API returned status ${res.statusCode}`,
+              api_url: railwayUrl,
+              status_code: res.statusCode,
+              response: data
+            })
+          }
+        })
+      })
+      
+      req.on('error', (error) => {
+        clearTimeout(timeout)
+        console.error("API request error:", error)
+        reject(error)
+      })
+      
+      req.setTimeout(30000, () => {
+        clearTimeout(timeout)
+        req.destroy()
+        reject(new Error('Request timeout'))
+      })
+    })
+    
+    return result
+    
+  } catch (error) {
+    console.error("Failed to test API connectivity:", error)
+    return {
+      status: "error",
+      message: `Failed to test API: ${error.message}`,
+      api_url: "https://contentcache-production.up.railway.app/health",
+      error_details: error.toString()
+    }
+  }
+})
+
 // App event handlers
 app.whenReady().then(async () => {
   // Remove the killProcessesOnPorts call that might be causing issues
@@ -535,3 +702,71 @@ app.on("before-quit", () => {
     exec("lsof -ti:3002,5001 | xargs kill -9 2>/dev/null || true", () => {})
   }, 1000)
 })
+
+// Get the correct Python executable for both development and packaged environments
+function getPythonExecutable() {
+  const isDev = !app.isPackaged
+  
+  if (isDev) {
+    // Development mode - use virtual environment
+    const venvPython = path.join(__dirname, "..", ".venv", "bin", "python")
+    if (require("fs").existsSync(venvPython)) {
+      return venvPython
+    }
+  }
+  
+  // Packaged mode or fallback - find system Python
+  if (process.platform === 'win32') {
+    // On Windows, try to find Python in common locations
+    const pythonPaths = [
+      'python',
+      'python3',
+      'C:\\Python310\\python.exe',
+      'C:\\Python39\\python.exe',
+      'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Programs\\Python\\Python310\\python.exe'
+    ]
+    
+    for (const pythonPath of pythonPaths) {
+      try {
+        require('child_process').execSync(`${pythonPath} --version`, { stdio: 'ignore' })
+        return pythonPath
+      } catch (e) {
+        continue
+      }
+    }
+    return 'python'
+  } else {
+    // On macOS/Linux, find the actual system Python
+    const pythonPaths = [
+      '/usr/bin/python3',
+      '/usr/local/bin/python3',
+      '/opt/homebrew/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.10/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.12/bin/python3',
+      'python3',
+      'python'
+    ]
+    
+    // Check for working Python executables
+    for (const pythonPath of pythonPaths) {
+      try {
+        if (pythonPath.startsWith('/')) {
+          // Absolute path - check if it exists
+          if (require("fs").existsSync(pythonPath)) {
+            return pythonPath
+          }
+        } else {
+          // Relative path - test if it works
+          require('child_process').execSync(`which ${pythonPath}`, { stdio: 'ignore' })
+          return pythonPath
+        }
+      } catch (e) {
+        continue
+      }
+    }
+    
+    // Fallback
+    return 'python3'
+  }
+}
