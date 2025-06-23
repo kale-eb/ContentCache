@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
 import openai
 import os
+import sys
 import base64
 import io
 import json
@@ -36,6 +37,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize clients
+openai_client = None
 try:
     # Log OpenAI version for debugging
     logger.info(f"OpenAI library version: {openai.__version__}")
@@ -47,36 +49,41 @@ try:
         try:
             openai_client = openai.OpenAI(api_key=api_key)
             logger.info("✅ OpenAI client initialized successfully")
-        except TypeError as te:
-            # Handle version compatibility issues (like the proxies argument)
-            logger.warning(f"Standard initialization failed with TypeError: {te}")
-            logger.info("Attempting alternative initialization method...")
-            try:
-                # Try with minimal arguments
-                openai_client = openai.OpenAI(api_key=api_key, timeout=30.0)
-                logger.info("✅ OpenAI client initialized with alternative method")
-            except Exception as e2:
-                logger.warning(f"Alternative initialization also failed: {e2}")
-                openai_client = None
+        except Exception as init_error:
+            logger.warning(f"OpenAI initialization failed: {init_error}")
+            openai_client = None
     else:
-        logger.warning("No OpenAI API key provided")
+        logger.warning("⚠️ No OpenAI API key provided - OpenAI features will be disabled")
         openai_client = None
 except Exception as e:
-    logger.warning(f"OpenAI client initialization failed: {e}")
+    logger.error(f"❌ OpenAI client initialization failed: {e}")
     openai_client = None
 
 @app.on_event("startup")
 async def startup_event():
     """Log when the application starts up."""
-    logger.info("=== ContentCache API Server Starting ===")
-    logger.info(f"OpenAI client: {'initialized' if openai_client else 'not available'}")
-    logger.info(f"Environment variables loaded: {bool(os.getenv('OPENAI_API_KEY'))}")
-    logger.info("=== Startup Complete ===")
+    try:
+        logger.info("=== ContentCache API Server Starting ===")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"FastAPI available: {bool(app)}")
+        logger.info(f"OpenAI client: {'initialized' if openai_client else 'not available'}")
+        logger.info(f"Environment variables:")
+        logger.info(f"  - OPENAI_API_KEY: {'present' if os.getenv('OPENAI_API_KEY') else 'missing'}")
+        logger.info(f"  - MOONDREAM_API_KEY: {'present' if os.getenv('MOONDREAM_API_KEY') else 'missing'}")
+        logger.info(f"  - GOOGLE_MAPS_API_KEY: {'present' if os.getenv('GOOGLE_MAPS_API_KEY') else 'missing'}")
+        logger.info(f"  - PORT: {os.getenv('PORT', '8000')}")
+        logger.info("=== Startup Complete ===")
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+        # Don't raise the error to prevent startup failure
 
 @app.on_event("shutdown") 
 async def shutdown_event():
     """Log when the application shuts down."""
-    logger.info("=== ContentCache API Server Shutting Down ===")
+    try:
+        logger.info("=== ContentCache API Server Shutting Down ===")
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -172,33 +179,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Simple health check that always returns 200 OK for Railway deployment."""
-    try:
-        logger.info("Health check endpoint called")
-        status = {
-            "status": "healthy",
-            "message": "ContentCache API Server is running",
-            "timestamp": "2025-01-15T00:00:00Z",
-            "services": {
-                "openai": bool(os.getenv("OPENAI_API_KEY")),
-                "moondream": bool(os.getenv("MOONDREAM_API_KEY")),
-                "google_maps": bool(os.getenv("GOOGLE_MAPS_API_KEY"))
-            },
-            "app_info": {
-                "version": "1.0.0",
-                "python_version": "3.10+",
-                "environment": "production"
-            }
-        }
-        logger.info(f"Health check returning: {status}")
-        return status
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        # Even if there's an error, still return 200 OK for Railway
-        return {
-            "status": "healthy", 
-            "message": "API server running despite health check error",
-            "error": str(e)
-        }
+    return {"status": "healthy", "message": "API server running"}
 
 # ============================================================================
 # OPENAI ENDPOINTS
@@ -228,6 +209,13 @@ async def openai_chat(request: OpenAIRequest):
 async def openai_vision_frame_analysis(request: VisionFrameAnalysisRequest):
     """Analyze video frames using GPT-4o vision with built-in prompt."""
     try:
+        if not openai_client:
+            logger.error("OpenAI client not available for vision analysis")
+            raise HTTPException(
+                status_code=503, 
+                detail="OpenAI client not available - check API key configuration"
+            )
+        
         num_frames = request.num_frames or len(request.images_base64)
         
         # Built-in prompt for frame analysis
@@ -266,6 +254,8 @@ async def openai_vision_frame_analysis(request: VisionFrameAnalysisRequest):
             "analysis": response.choices[0].message.content,
             "usage": response.usage.model_dump() if response.usage else None
         }
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"OpenAI Vision Frame Analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -274,6 +264,13 @@ async def openai_vision_frame_analysis(request: VisionFrameAnalysisRequest):
 async def openai_video_summary(request: VideoSummaryRequest):
     """Generate comprehensive video summary using GPT-4o with built-in prompt and function calling."""
     try:
+        if not openai_client:
+            logger.error("OpenAI client not available for video summary")
+            raise HTTPException(
+                status_code=503, 
+                detail="OpenAI client not available - check API key configuration"
+            )
+        
         # Build the content string with all available information
         content_parts = [
             f"Frame Captions: {request.frame_captions}",
