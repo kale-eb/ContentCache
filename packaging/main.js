@@ -98,7 +98,8 @@ function getBackendPath() {
   const isDev = !app.isPackaged
   
   if (isDev) {
-    return path.join(__dirname, "..", "backend")
+    // In development, use the backend folder within packaging
+    return path.join(__dirname, "backend")
   } else {
     // In packaged app, backend is in resources
     return path.join(process.resourcesPath, "backend")
@@ -539,7 +540,7 @@ function startSearchServer() {
       const output = data.toString()
       console.log(`🔍 Search Server STDOUT: ${output}`)
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("search-server-output", output)
+      mainWindow.webContents.send("search-server-output", output)
       }
     })
 
@@ -609,7 +610,7 @@ function startPythonProcess() {
     pythonProcess.stderr.on("data", (data) => {
       console.error(`Python stderr: ${data}`)
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("python-error", data.toString())
+      mainWindow.webContents.send("python-error", data.toString())
       }
     })
 
@@ -621,7 +622,7 @@ function startPythonProcess() {
     setTimeout(() => {
       if (pythonProcess && pythonProcess.stdin && !pythonProcess.killed) {
         try {
-          pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
+        pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
         } catch (error) {
           console.error("Error writing initial status to Python stdin:", error)
         }

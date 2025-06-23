@@ -1,0 +1,19 @@
+# FastAPI and server dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Core API dependencies
+openai>=1.55.0
+requests==2.31.0
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# Image processing
+pillow==10.4.0
+
+# Moondream for image captioning
+moondream==0.1.0
+
+# Standard library imports (no installation needed)
+# os, base64, io, json, logging, pathlib, typing 
