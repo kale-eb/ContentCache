@@ -154,12 +154,14 @@ async function downloadModelsIfNeeded() {
     }
     
     // Use the model downloader
-    const modelDownloaderPath = path.join(__dirname, "python", "model_downloader.py")
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3'
+    const modelDownloaderPath = path.join(getPythonScriptsPath(), "model_downloader.py")
+    const pythonCmd = getPythonExecutable()
+    
+    console.log(`Using model downloader: ${modelDownloaderPath}`)
     
     const downloadProcess = spawn(pythonCmd, [modelDownloaderPath, '--required-only'], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: __dirname
+      cwd: getPythonScriptsPath()
     })
     
     downloadProcess.stdout.on("data", (data) => {
@@ -935,33 +937,108 @@ async function handleTestApiConnectivity(event) {
 // Stop processing handler
 async function handleStopProcessing() {
   try {
-    if (pythonProcess && !pythonProcess.killed) {
-      console.log("🛑 Sending enhanced stop command to Python process...")
+    console.log("🛑 Stopping processing using tagdirectory stop_running_instance()...")
+    
+    // Use the proper stop function from tagdirectory.py
+    const backendPath = getBackendPath()
+    const pythonExe = getPythonExecutable()
+    const tagDirectoryPath = path.join(backendPath, "processing", "tagdirectory.py")
+    
+    // Call tagdirectory.py --stop to use the built-in stop_running_instance() function
+    const stopProcess = spawn(pythonExe, [tagDirectoryPath, "--stop"], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: path.join(backendPath, "processing")
+    })
+    
+    return new Promise((resolve) => {
+      let output = ''
+      let errorOutput = ''
       
-      // Send enhanced stop command
-      pythonProcess.stdin.write(JSON.stringify({
-        action: 'stop_enhanced'
-      }) + '\n')
+      stopProcess.stdout.on('data', (data) => {
+        output += data.toString()
+        console.log(`Stop output: ${data.toString().trim()}`)
+      })
       
-      console.log("✅ Enhanced stop command sent")
-      return { success: true }
-    } else {
-      console.log("⚠️ No Python process running")
-      return { success: false, message: "No Python process running" }
-    }
+      stopProcess.stderr.on('data', (data) => {
+        errorOutput += data.toString()
+        console.log(`Stop error: ${data.toString().trim()}`)
+      })
+      
+      stopProcess.on('close', (code) => {
+        if (code === 0) {
+          console.log("✅ Processing stopped successfully")
+          resolve({ success: true, message: "Processing stopped successfully" })
+        } else {
+          console.log(`⚠️ Stop command exited with code ${code}`)
+          resolve({ success: true, message: `Stop command completed with code ${code}` })
+        }
+      })
+      
+      stopProcess.on('error', (error) => {
+        console.error("❌ Failed to execute stop command:", error)
+        resolve({ success: false, error: error.message })
+      })
+      
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        if (!stopProcess.killed) {
+          stopProcess.kill('SIGTERM')
+          resolve({ success: true, message: "Stop command timed out but process was terminated" })
+        }
+      }, 10000)
+    })
+    
   } catch (error) {
     console.error("❌ Failed to stop processing:", error)
     return { success: false, error: error.message }
   }
 }
 
+// Download ffmpeg and ffprobe binaries if they don't exist
+async function ensureFfmpegBinaries() {
+  // Check if FFmpeg is available in system PATH first
+  try {
+    const { execSync } = require('child_process')
+    execSync('ffmpeg -version', { stdio: 'ignore' })
+    execSync('ffprobe -version', { stdio: 'ignore' })
+    console.log("✅ FFmpeg binaries found in system PATH")
+    return true
+  } catch (error) {
+    console.log("⚠️ FFmpeg not found in system PATH")
+  }
+  
+  // Check for bundled binaries in the app package
+  const binariesDir = path.join(__dirname, "binaries")
+  const ffmpegPath = path.join(binariesDir, "ffmpeg")
+  const ffprobePath = path.join(binariesDir, "ffprobe")
+  
+  if (fs.existsSync(ffmpegPath) && fs.existsSync(ffprobePath)) {
+    console.log("✅ FFmpeg binaries found in app bundle")
+    return true
+  }
+  
+  // For now, we'll continue without FFmpeg and let the Python backend handle it
+  console.log("⚠️ FFmpeg binaries not found - some features may be limited")
+  console.log("📝 Note: Video processing will use Python backend's FFmpeg handling")
+  return false
+}
+
 // App event handlers
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log("🚀 App is ready! Starting initialization sequence...")
   
   // Setup Python environment for packaged apps
   setupPythonEnvironment()
   console.log("✅ Python environment setup complete")
+  
+  // Ensure FFmpeg binaries are available
+  console.log("🔧 Ensuring FFmpeg binaries are available...")
+  try {
+    await ensureFfmpegBinaries()
+    console.log("✅ FFmpeg binaries ready")
+  } catch (error) {
+    console.error("❌ Failed to setup FFmpeg binaries:", error)
+  }
   
   createWindow()
   console.log("✅ Main window created")

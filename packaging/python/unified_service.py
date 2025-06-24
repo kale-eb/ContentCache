@@ -549,6 +549,28 @@ class ContentCacheService:
         except Exception as e:
             return {'running': False, 'error': str(e)}
 
+    def stop_processing(self) -> Dict[str, Any]:
+        """Stop any currently running processing by calling tagdirectory stop function."""
+        try:
+            # Try to import and call the tagdirectory stop function
+            from tagdirectory import stop_running_instance
+            result = stop_running_instance()
+            return {
+                "success": True,
+                "message": "Stop command sent to tagdirectory",
+                "result": result
+            }
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"Could not import tagdirectory stop function: {str(e)}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to stop processing: {str(e)}"
+            }
+
 
 # Convenience functions for easy integration
 def create_service(progress_callback: Optional[Callable] = None, stop_flag: Optional[Callable] = None) -> ContentCacheService:

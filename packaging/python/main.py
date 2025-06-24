@@ -17,6 +17,16 @@ class ElectronBridge:
             stop_flag=lambda: self.processing_stopped
         )
         self.processing_stopped = False
+        
+        # Set up API client stop callback if available
+        try:
+            from api_client import get_api_client
+            client = get_api_client()
+            client.set_stop_callback(self.trigger_stop_from_api)
+            print("✅ API client configured with stop callback in ElectronBridge")
+        except Exception as e:
+            print(f"⚠️ Could not configure API client stop callback in ElectronBridge: {e}")
+            
         self.send_output("ContentCache service initialized")
     
     def progress_callback(self, stage: str, progress: float, message: str):
@@ -267,6 +277,15 @@ class ElectronBridge:
             self.send_json_response({
                 "type": "stop_error",
                 "error": error_msg
+            })
+
+    def trigger_stop_from_api(self):
+        """Called by API client when repeated failures occur"""
+        print("🛑 Stop triggered by API failures - setting processing_stopped flag")
+        self.processing_stopped = True
+        self.send_json_response({
+            "type": "api_stop",
+            "message": "Processing stopped due to repeated API failures"
             })
 
 def main():

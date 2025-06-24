@@ -795,7 +795,7 @@ export function DashboardTab() {
               <div className="p-4 bg-purple-50 rounded-xl">
                 <FileText className="w-7 h-7 text-purple-600" />
               </div>
-            </div>
+      </div>
           </CardContent>
         </Card>
 

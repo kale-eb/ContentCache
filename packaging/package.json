@@ -14,10 +14,10 @@
     "electron-dev": "npm run kill-ports && sleep 2 && next dev -p 3002 & sleep 5 && NODE_ENV=development electron .",
     "electron-build": "electron-builder",
     "bundle-python": "node scripts/bundle-python.js",
-    "dist": "npm run build && npm run bundle-python && npm run electron-build",
-    "dist-mac": "npm run build && npm run bundle-python && npm run electron-build --mac",
-    "dist-win": "npm run build && npm run bundle-python && npm run electron-build --win",
-    "dist-linux": "npm run build && npm run bundle-python && npm run electron-build --linux",
+    "dist": "npm run build && npm run electron-build",
+    "dist-mac": "npm run build && npm run electron-build --mac",
+    "dist-win": "npm run build && npm run electron-build --win",
+    "dist-linux": "npm run build && npm run electron-build --linux",
     "kill-ports": "lsof -ti:3002,5001 | xargs kill -9 2>/dev/null || true"
   },
   "build": {

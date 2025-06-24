@@ -9,13 +9,35 @@ def get_ffmpeg_path():
     """Get the path to the bundled ffmpeg binary or system ffmpeg."""
     # Try bundled ffmpeg first (in packaged app)
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    bundled_ffmpeg = os.path.join(current_dir, '..', '..', 'binaries', 'ffmpeg')
+    possible_paths = [
+        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffmpeg'),
+        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffmpeg'),
+        os.path.join(current_dir, 'binaries', 'ffmpeg'),
+    ]
     
-    if os.path.exists(bundled_ffmpeg):
-        return bundled_ffmpeg
+    for bundled_ffmpeg in possible_paths:
+        if os.path.exists(bundled_ffmpeg):
+            return bundled_ffmpeg
     
     # Fallback to system ffmpeg
     return 'ffmpeg'
+
+def get_ffprobe_path():
+    """Get the path to the bundled ffprobe binary or system ffprobe."""
+    # Try bundled ffprobe first (in packaged app)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_paths = [
+        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffprobe'),
+        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffprobe'),
+        os.path.join(current_dir, 'binaries', 'ffprobe'),
+    ]
+    
+    for bundled_ffprobe in possible_paths:
+        if os.path.exists(bundled_ffprobe):
+            return bundled_ffprobe
+    
+    # Fallback to system ffprobe
+    return 'ffprobe'
 
 def extract_audio_from_video(video_path):
     """

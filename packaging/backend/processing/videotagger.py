@@ -10,7 +10,7 @@ from framestagging import (
     calculate_keyframes_to_send,
     select_representative_keyframes
 )
-import audioprocessor
+import audioanalyzer
 from location_utils import process_location_from_metadata
 from config import get_video_metadata_path, get_temp_frames_dir
 from api_client import get_api_client
@@ -737,13 +737,6 @@ def detect_caption_conflicts(caption, context_embedding, quality_score, threshol
     
     return len(conflicts) > 0, conflicts
 
-def get_single_frame_gpt4o_caption(image_path):
-    """
-    Get caption for a single frame using GPT-4o mini vision.
-    """
-    # NOTE: Direct OpenAI calls disabled in packaged app - using Railway API instead
-    print("⚠️ Direct GPT-4o caption analysis disabled in packaged app (using Railway API instead)")
-    return None
 
 def get_overall_video_context(selected_frames):
     """
@@ -756,7 +749,7 @@ def get_overall_video_context(selected_frames):
     # Use framestagging function for vision analysis
     return framestagging.analyze_keyframes_with_gpt4o_vision(selected_frames)
 
-def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moondream_api=True, compress_frames=False, max_pixels=1000):
+def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moondream_api=True, compress_frames=False, max_pixels=1000, stop_flag=None):
     """
     Enhanced video tagging with concurrent processing of all major operations.
     
@@ -766,12 +759,21 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         use_moondream_api (bool): Whether to use Moondream API for initial captioning (default: True)
         compress_frames (bool): Whether to compress frames to max_pixels during extraction
         max_pixels (int): Maximum pixels for longest side if compressing frames
+        stop_flag (callable): Optional function that returns True when processing should stop
     
     Process:
     1. Extract frames
     2. Run concurrently: OCR, GPT-4o Vision, Moondream API, Audio processing
     3. Combine results for final analysis
     """
+    
+    # Set up API client with stop callback
+    try:
+        client = api_client.get_api_client()
+        print("✅ API client configured")
+    except Exception as e:
+        print(f"⚠️ Could not configure API client: {e}")
+    
     memory_start = get_memory_usage()
     
     print(f"🔍 Starting CONCURRENT video analysis for: {vid_path}")
@@ -792,7 +794,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     if not frame_files:
         error_msg = f"Frame extraction failed: no frames found in {frames_dir}"
         print(f"❌ {error_msg}")
-        # Clean up empty directory
+        # Clean up frames directory  
         try:
             shutil.rmtree(frames_dir)
         except:
@@ -808,14 +810,19 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     selected_frames = select_representative_keyframes(frames_dir, num_to_send)
     print(f"✓ Selected {len(selected_frames)} keyframes from {total_keyframes} total frames")
     
-    # Step 3: Extract video metadata (quick operation, run synchronously)
+    # Step 3: Extract video metadata for analysis
     print("Step 3: Extracting video metadata...")
     video_metadata = extract_video_metadata(vid_path)
+    trimmed_metadata = trim_metadata_for_api(video_metadata)
+    
+    # Extract location information
     processed_location = extract_and_store_location_coordinates(video_metadata)
     if processed_location:
         print(f"✓ Location processed: {processed_location}")
     else:
         print("✓ No location information found in metadata")
+    
+    print(f"✓ Video metadata extracted")
     
     # Step 4: Define concurrent processing functions
     def process_ocr():
@@ -823,90 +830,53 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         try:
             print("🔤 [OCR Thread] Starting text extraction (local EasyOCR)...")
             text_data = extract_prominent_text_from_frames(selected_frames)
+            
             print(f"✅ [OCR Thread] Text extraction complete: {len(text_data.get('prominent_text', []))} prominent texts")
             return text_data
+            
         except Exception as e:
-            print(f"❌ [OCR Thread] Error: {e}")
+            print(f"❌ [OCR Thread] Text extraction failed: {e}")
             return {'prominent_text': [], 'frame_details': {}}
     
-    def process_gpt4o_vision():
-        """Analyze keyframes with GPT-4o vision via API server"""
+    def process_moondream():
+        """Process frames with Moondream API"""
         try:
-            print("👁️ [GPT-4o Thread] Starting vision analysis via API server...")
+            print("🌙 [Moondream Thread] Starting API processing...")
             
-            # Use API server for vision frame analysis (prompt is built-in)
-            api_response = api_client.get_api_client().openai_vision_frame_analysis(selected_frames)
+            # Use API server for Moondream batch processing
+            api_response = api_client.get_api_client().moondream_batch_process(selected_frames)
             
-            if api_response and 'analysis' in api_response:
-                vision_analysis = api_response['analysis']
-                print(f"✅ [GPT-4o Thread] Vision analysis complete via API server")
-                return vision_analysis
+            if api_response and 'results' in api_response:
+                frame_captions = api_response['results']
+                print(f"✅ [Moondream Thread] API processing complete: {len(frame_captions)} results")
+                return frame_captions
             else:
-                raise Exception("Invalid API response for vision analysis")
+                raise Exception("Invalid API response for Moondream processing")
                 
         except Exception as e:
-            print(f"⚠️ [GPT-4o Thread] API server failed, falling back to direct call: {e}")
-            # Fallback to original framestagging function
+            print(f"⚠️ [Moondream Thread] API server failed, falling back to local processing: {e}")
+            # Fallback to original function
             try:
-                vision_analysis = analyze_keyframes_with_gpt4o_vision(selected_frames)
-                print(f"✅ [GPT-4o Thread] Fallback vision analysis complete")
-                return vision_analysis
-            except Exception as fallback_error:
-                print(f"❌ [GPT-4o Thread] Both API and fallback failed: {fallback_error}")
-                return None
-    
-    def process_moondream_api():
-        """Process frames with Moondream API for frame-level captioning via API server"""
-        try:
-            if use_moondream_api:
-                print("🌙 [Moondream Thread] Starting frame captioning via API server...")
-                
-                # Use API server for batch Moondream processing
-                api_response = api_client.get_api_client().moondream_batch_process(selected_frames)
-                
-                if api_response and 'results' in api_response:
-                    frame_captions = []
-                    for i, result in enumerate(api_response['results']):
-                        if result.get('success', False):
-                            frame_path = selected_frames[i] if i < len(selected_frames) else f"frame_{i}"
-                            frame_captions.append({
-                                'frame': os.path.basename(frame_path),
-                                'caption': result.get('caption', ''),
-                                'index': i
-                            })
-                    
-                    print(f"✅ [Moondream Thread] Frame processing complete via API server: {len(frame_captions)} frames")
-                    return frame_captions
-                else:
-                    raise Exception("Invalid API response for Moondream batch processing")
-            else:
-                print("🌙 [Moondream Thread] Skipped (using vision analysis only)")
-                return []
-        except Exception as e:
-            print(f"⚠️ [Moondream Thread] API server failed, falling back to direct call: {e}")
-            # Fallback to original framestagging function
-            try:
-                if use_moondream_api:
-                    frame_captions = process_frames_with_moondream_api(frames_dir, vid_path)
-                    print(f"✅ [Moondream Thread] Fallback processing complete: {len(frame_captions)} frames")
-                    return frame_captions
-                else:
-                    return []
+                frame_captions = process_frames_with_moondream_api(selected_frames)
+                print(f"✅ [Moondream Thread] Fallback processing complete")
+                return frame_captions
             except Exception as fallback_error:
                 print(f"❌ [Moondream Thread] Both API and fallback failed: {fallback_error}")
                 return []
     
     def process_audio():
-        """Extract and analyze audio using OpenAI via API server"""
+        """Extract and analyze audio using Whisper + GPT-4o"""
         try:
-            print("🎵 [Audio Thread] Starting audio analysis...")
-            # Use analyze_audio_with_openai which handles video files and returns summarized analysis
-            from audioanalyzer import analyze_audio_with_openai
-            audio_summary = analyze_audio_with_openai(vid_path)
-            print(f"✅ [Audio Thread] Audio analysis complete")
+            print("🎵 [Audio Thread] Starting audio processing...")
+            
+            # Use audioanalyzer for Whisper transcription + OpenAI analysis
+            audio_summary = audioanalyzer.analyze_audio_with_openai(vid_path)
+            
+            print(f"✅ [Audio Thread] Audio processing complete")
             return audio_summary
+            
         except Exception as e:
-            print(f"❌ [Audio Thread] Error: {e}")
+            print(f"❌ [Audio Thread] Audio processing failed: {e}")
             return None
     
     # Step 5: Run all operations concurrently
@@ -917,8 +887,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         # Submit all tasks
         futures = {
             'ocr': executor.submit(process_ocr),
-            'vision': executor.submit(process_gpt4o_vision),
-            'moondream': executor.submit(process_moondream_api),
+            'moondream': executor.submit(process_moondream),
             'audio': executor.submit(process_audio)
         }
         
@@ -927,7 +896,6 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
         # Wait for all tasks to complete with progress reporting
         completed_tasks = []
         text_data = None
-        vision_analysis = None
         frame_captions = None
         audio_summary = None
         
@@ -936,15 +904,13 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
             for task_name, task_future in futures.items():
                 if future == task_future:
                     completed_tasks.append(task_name)
-                    print(f"✅ [{task_name.upper()}] Completed ({len(completed_tasks)}/4)")
+                    print(f"✅ [{task_name.upper()}] Completed ({len(completed_tasks)}/3)")
                     
                     # Collect results
                     try:
                         result = future.result()
                         if task_name == 'ocr':
                             text_data = result
-                        elif task_name == 'vision':
-                            vision_analysis = result
                         elif task_name == 'moondream':
                             frame_captions = result
                         elif task_name == 'audio':
@@ -954,8 +920,6 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
                         # Set default values for failed tasks
                         if task_name == 'ocr':
                             text_data = {'prominent_text': [], 'frame_details': {}}
-                        elif task_name == 'vision':
-                            vision_analysis = None
                         elif task_name == 'moondream':
                             frame_captions = []
                         elif task_name == 'audio':
@@ -998,7 +962,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
                 caption_texts.append(item['caption'])
     
     # Call GPT-4o with actual frame captions (not file paths)
-    result = call_gpt4o(caption_texts, audio_summary, video_metadata, vision_analysis, text_data, processed_location)
+    result = call_gpt4o(caption_texts, audio_summary, video_metadata, processed_location=processed_location)
     
     parsed = json.loads(result)
     memory_after_gpt = get_memory_usage()
@@ -1019,7 +983,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     memory_freed_by_cleanup = cleanup_video_processing(
         selected_frames=selected_frames,
         text_data=text_data,
-        vision_analysis=vision_analysis,
+        frame_captions=frame_captions,
         audio_summary=audio_summary,
         video_metadata=video_metadata,
         result=result,
@@ -1047,7 +1011,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     
     return result_copy
 
-def cleanup_video_processing(selected_frames=None, text_data=None, vision_analysis=None, audio_summary=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
+def cleanup_video_processing(selected_frames=None, text_data=None, audio_summary=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
     """
     Cleanup function for video processing to prevent memory leaks.
     
@@ -1063,7 +1027,6 @@ def cleanup_video_processing(selected_frames=None, text_data=None, vision_analys
     cleanup_vars = {
         'selected_frames': selected_frames,
         'text_data': text_data,
-        'vision_analysis': vision_analysis,
         'audio_summary': audio_summary,
         'video_metadata': video_metadata,
         'result': result,

@@ -19,13 +19,43 @@ logger = logging.getLogger(__name__)
 
 class ContentCacheAPIClient:
     def __init__(self, base_url: str = "https://contentcache-production.up.railway.app"):
-        """Initialize the API client with railway production URL by default."""
+        """
+        Initialize the API client
+        
+        Args:
+            base_url: Base URL for the ContentCache API server
+        """
         self.base_url = base_url.rstrip('/')
+        self.logger = logging.getLogger(__name__)
+        self.stop_callback = None  # Will be set by the processing system
+        
+        # Test connection on initialization
+        try:
+            status = self.health_check()
+            print(f"✅ API Client initialized: {status}")
+        except Exception as e:
+            print(f"⚠️ API Client initialized but server unreachable: {e}")
+        
         self.session = requests.Session()
         logger.info(f"ContentCache API Client initialized with base URL: {self.base_url}")
         
         # Set timeout for all requests
         self.session.timeout = 30
+    
+    def set_stop_callback(self, callback):
+        """Set the callback function to call when processing should be stopped due to API failures"""
+        self.stop_callback = callback
+    
+    def _trigger_stop_processing(self, reason: str):
+        """Trigger stop processing by calling the stop callback if available"""
+        try:
+            if self.stop_callback and callable(self.stop_callback):
+                print(f"🛑 Calling stop callback: {reason}")
+                self.stop_callback()
+            else:
+                print(f"⚠️ No stop callback available to trigger stop processing: {reason}")
+        except Exception as e:
+            print(f"❌ Error triggering stop processing: {e}")
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[Any, Any]:
         """Make HTTP request to the API server with retry logic."""
@@ -34,85 +64,57 @@ class ContentCacheAPIClient:
         print(f"🌐 Making {method} request to: {url}")
         
         max_retries = 2
-        retry_delay = 5  # seconds
+        retry_delay = 10  # Updated to 10 seconds
         
         for attempt in range(max_retries + 1):  # 0, 1, 2 (3 total attempts)
             try:
                 # Add a reasonable timeout if not specified
                 if 'timeout' not in kwargs:
-                    kwargs['timeout'] = 30
-                    
+                    kwargs['timeout'] = 30    
                 response = requests.request(method, url, **kwargs)
                 
                 print(f"📡 Response status: {response.status_code}")
-                print(f"📊 Response size: {len(response.content)} bytes")
+                print(f"📊 Response size: {len(response.content) if response.content else 0} bytes")
                 
-                response.raise_for_status()
-                return response.json()
-                
-            except (requests.exceptions.ConnectionError, 
-                    requests.exceptions.Timeout, 
-                    requests.exceptions.HTTPError) as e:
-                
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                    if attempt < max_retries:
+                        print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                        print(f"⏱️ Waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        # Final failure - trigger stop processing
+                        print(f"❌ API request failed after {max_retries + 1} attempts: {error_msg}")
+                        print(f"🛑 Triggering stop processing due to repeated API failures")
+                        self._trigger_stop_processing("API failed after 3 attempts")
+                        raise requests.exceptions.RequestException(f"API failed after {max_retries + 1} attempts: {error_msg}")      
+            except requests.exceptions.RequestException as e:
                 if attempt < max_retries:
                     print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
                     print(f"⏱️ Waiting {retry_delay} seconds before retry...")
-                    
                     time.sleep(retry_delay)
                     continue
                 else:
-                    # Final attempt failed - handle different error types
-                    if isinstance(e, requests.exceptions.ConnectionError):
-                        error_msg = f"Connection failed to {url} after {max_retries + 1} attempts: {str(e)}"
-                        print(f"🔌 {error_msg}")
-                        print(f"💡 This usually means the Railway API server is down or unreachable")
-                    elif isinstance(e, requests.exceptions.Timeout):
-                        error_msg = f"Request timeout to {url} after {max_retries + 1} attempts: {str(e)}"
-                        print(f"⏱️ {error_msg}")
-                        print(f"💡 The API server may be overloaded or experiencing issues")
-                    elif isinstance(e, requests.exceptions.HTTPError):
-                        error_msg = f"HTTP error {response.status_code} from {url} after {max_retries + 1} attempts: {str(e)}"
-                        print(f"❌ {error_msg}")
-                        if response.content:
-                            print(f"📄 Error response body: {response.content[:500]}")
-                        print(f"💡 The API server returned an error - check Railway deployment logs")
-                    
-                    logger.error(error_msg)
-                    
-                    # Notify user about API failure
-                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
-                    print(f"🔧 Please check your Railway API deployment and try again")
-                    
-                    raise Exception(error_msg)
-                    
-            except requests.exceptions.RequestException as e:
+                    # Final failure - trigger stop processing
+                    print(f"❌ API request failed after {max_retries + 1} attempts: {str(e)}")
+                    print(f"🛑 Triggering stop processing due to repeated API failures")
+                    self._trigger_stop_processing("API connection failed after 3 attempts")
+                    raise
+            except Exception as e:
                 if attempt < max_retries:
-                    print(f"⚠️ Request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
+                    print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
                     print(f"⏱️ Waiting {retry_delay} seconds before retry...")
-                    
                     time.sleep(retry_delay)
                     continue
                 else:
-                    error_msg = f"Request failed to {url} after {max_retries + 1} attempts: {str(e)}"
-                    print(f"🚫 {error_msg}")
-                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                    
-            except json.JSONDecodeError as e:
-                if attempt < max_retries:
-                    print(f"⚠️ Invalid JSON response (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
-                    print(f"⏱️ Waiting {retry_delay} seconds before retry...")
-                    
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    error_msg = f"Invalid JSON response from {url} after {max_retries + 1} attempts: {str(e)}"
-                    print(f"📄 {error_msg}")
-                    print(f"📄 Response content: {response.content[:500]}")
-                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    # Final failure - trigger stop processing
+                    print(f"❌ API request failed after {max_retries + 1} attempts: {str(e)}")
+                    print(f"🛑 Triggering stop processing due to repeated API failures")
+                    self._trigger_stop_processing("Unexpected API error after 3 attempts")
+                    raise
     
     def health_check(self) -> Dict[str, Any]:
         """Check API server health and service availability."""

@@ -160,4 +160,4 @@ if __name__ == "__main__":
     # Test cleanup
     cleanup_temp_frames()
     
-    print("✅ Configuration test complete")
+    print("✅ Configuration test complete") 

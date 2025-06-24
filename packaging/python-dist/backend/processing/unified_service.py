@@ -167,12 +167,12 @@ class ContentCacheService:
                 }
             else:
                 self._emit_progress("api_failed", 100, f"API processing returned empty result")
-                return {
+            return {
                     "status": "error",
                     "message": f"Processing returned empty result for {filename}",
                     "file_path": abs_path,
                     "file_type": file_type
-                }
+            }
                 
         except Exception as e:
             error_msg = f"Error processing {filename}: {str(e)}"
@@ -422,33 +422,15 @@ class ContentCacheService:
             return False
 
     def stop_processing(self):
-        """Stop any running directory processing by setting the stop flag and optionally calling tagdirectory's stop function."""
+        """Stop any running directory processing by setting the stop flag."""
         try:
-            # First, check if we have a stop_flag (running inside Electron app)
-            if hasattr(self, 'stop_flag') and callable(self.stop_flag):
-                print("🛑 Setting internal stop flag for current processing...")
-                # The stop_flag is already a lambda that checks processing_stopped
-                # We don't need to set it here, the ElectronBridge handles that
-                print("✅ Internal stop flag mechanism active")
+            print("🛑 Stop processing called - relying on stop_flag mechanism")
             
-            # Only try to stop external tagdirectory process if we're NOT in Electron app
-            # Check if we're running as a standalone script vs inside Electron
-            import sys
-            if 'main.py' not in sys.argv[0] and len(sys.argv) > 0:
-                # We're likely running standalone, try to stop external tagdirectory
-                from tagdirectory import stop_running_instance
-                print("🛑 Calling tagdirectory stop_running_instance...")
-                result = stop_running_instance()
-                if result:
-                    print("✅ Successfully stopped external tagdirectory processing")
-                    return {"status": "success", "message": "External processing stopped successfully"}
-                else:
-                    print("⚠️ No external running process found or failed to stop")
-                    return {"status": "warning", "message": "No external running process found"}
-            else:
-                # We're running inside Electron app, don't try to kill external process
-                print("✅ Running inside Electron app - using internal stop mechanism only")
-                return {"status": "success", "message": "Internal stop flag set - processing will stop at next checkpoint"}
+            # The actual stopping happens via the stop_flag lambda in the ElectronBridge
+            # which checks self.processing_stopped. We don't need to do anything complex here.
+            
+            print("✅ Stop mechanism active - processing will stop at next checkpoint")
+            return {"status": "success", "message": "Stop signal sent - processing will stop at next checkpoint"}
                 
         except Exception as e:
             error_msg = f"Failed to stop processing: {str(e)}"

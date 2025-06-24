@@ -413,12 +413,6 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
         if stage == "directory_processing":
             print(f"📁 {progress:.1f}% - {message}")
     
-    def should_stop():
-        """Check if processing should stop"""
-        if stop_flag and callable(stop_flag):
-            return stop_flag()
-        return False
-    
     print("🚀 Starting ContentCache batch processing...")
     emit_progress("directory_processing", 0, f"Starting directory processing: {directory}")
     
@@ -495,7 +489,7 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
     def process_file_by_type(file_type, file_path):
         """Process a file based on its determined type"""
         if file_type == "video":
-            tag_video_smart_conflict_resolution(file_path, use_moondream_api=True)
+            tag_video_smart_conflict_resolution(file_path, use_moondream_api=True, stop_flag=stop_flag)
             return "video"
         elif file_type == "text":
             text_processor.process_file(file_path)
@@ -522,9 +516,10 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
     
     for root, _, files in os.walk(directory):
         # Check for stop signal during file collection
-        if should_stop():
+        if stop_flag and callable(stop_flag) and stop_flag():
             print("⚠️ Processing stopped during file collection")
             emit_progress("directory_processing", 100, "Processing stopped by user")
+            stop_running_instance()
             return {"status": "stopped", "message": "Processing stopped during file collection"}
             
         for file in files:
@@ -557,9 +552,10 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
     for file_index, (file_path, abs_path, file) in enumerate(files_to_process):
             
             # Check for stop signal at the beginning of each file processing
-            if should_stop():
+            if stop_flag and callable(stop_flag) and stop_flag():
                 print(f"⚠️ Processing stopped by user after {stats['processed']} files")
                 emit_progress("directory_processing", 100, f"Processing stopped by user. Processed {stats['processed']} files.")
+                stop_running_instance()
                 return {
                     "status": "stopped",
                     "total_files": total_files,

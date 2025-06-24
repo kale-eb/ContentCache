@@ -168,7 +168,7 @@ def analyze_keyframes_with_gpt4o_vision(selected_frames):
     """Analyze selected keyframes using GPT-4o mini vision API."""
     # NOTE: Direct OpenAI calls disabled in packaged app - using Railway API instead
     print("⚠️ Direct GPT-4o vision analysis disabled in packaged app (using Railway API instead)")
-    return None
+        return None
 
 def process_frames_with_moondream_api(frames_dir, vid_path):
     """

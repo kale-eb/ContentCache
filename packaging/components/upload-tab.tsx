@@ -153,6 +153,25 @@ export function UploadTab() {
               addLog('info', `System status: ${response.search_server?.running ? 'Search server online' : 'Search server offline'}`)
               break
 
+            case "stop_complete":
+              setIsProcessing(false)
+              setProcessingStatus('stopped')
+              addLog('info', response.message || 'Processing stopped successfully')
+              break
+
+            case "stop_error":
+              setIsProcessing(false)
+              setProcessingStatus('stopped')
+              addLog('error', response.error || 'Error stopping processing')
+              break
+              
+            case "api_stop":
+              setIsProcessing(false)
+              setProcessingStatus('stopped')
+              addLog('error', '🚨 Processing stopped due to repeated API failures')
+              addLog('error', '💡 Please check your Railway API deployment and try again')
+              break
+
             default:
               if (response.message) {
                 addLog('info', response.message)
@@ -162,9 +181,41 @@ export function UploadTab() {
           // Handle non-JSON output (plain text messages)
           if (data.startsWith("OUTPUT:")) {
             const message = data.replace("OUTPUT:", "").trim()
+            
+            // Check for API error messages and provide special handling
+            if (message.includes("🚨 API ERROR") || message.includes("API ERROR")) {
+              addLog('error', message)
+              setIsProcessing(false)
+              setProcessingStatus('error')
+              toast({
+                title: "API Error",
+                description: "Processing stopped due to Railway API issues. Check logs for details.",
+                variant: "destructive",
+              })
+            } else if (message.includes("⚠️ API request failed") || message.includes("⏱️ Waiting") || message.includes("attempts")) {
+              // API retry messages - show as warnings
+              addLog('progress', message)
+            } else if (message.includes("Railway API call failed") || message.includes("HTTP error 502")) {
+              addLog('error', message)
+              // Don't stop processing immediately for single API failures - let retry logic handle it
+            } else {
             addLog('info', message)
+            }
           } else {
-            addLog('info', data.trim())
+            // Handle other non-JSON messages
+            const trimmedData = data.trim()
+            if (trimmedData.includes("🚨 API ERROR") || trimmedData.includes("API ERROR")) {
+              addLog('error', trimmedData)
+              setIsProcessing(false)
+              setProcessingStatus('error')
+              toast({
+                title: "API Error",
+                description: "Processing stopped due to Railway API issues. Check logs for details.",
+                variant: "destructive",
+              })
+            } else {
+              addLog('info', trimmedData)
+            }
           }
         }
       })
@@ -462,13 +513,13 @@ export function UploadTab() {
               <CardContent className="space-y-4">
                 {isProcessing && (
                   <>
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-sm">
-                        <span>Progress</span>
-                        <span>{currentProgress.toFixed(1)}%</span>
-                      </div>
-                      <Progress value={currentProgress} className="w-full" />
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Progress</span>
+                      <span>{currentProgress.toFixed(1)}%</span>
                     </div>
+                    <Progress value={currentProgress} className="w-full" />
+                  </div>
                     <div className="flex justify-center">
                       <Button
                         variant="destructive"
