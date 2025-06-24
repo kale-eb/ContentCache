@@ -913,7 +913,7 @@ async def moondream_analysis(request: MoondreamAnalysisRequest):
         image = decode_base64_to_image(request.image_base64)
         
         # Generate caption
-        caption_result = model.caption(image, length="normal")
+        caption_result = model.caption(image, length="short")
         caption = caption_result.get("caption", "")
         
         # Extract prominent objects using a targeted query
@@ -978,7 +978,7 @@ async def moondream_batch_process(request: Dict[str, List[str]]):
         for i, img_base64 in enumerate(images_base64):
             try:
                 image = decode_base64_to_image(img_base64)
-                result = model.caption(image, length="normal")
+                result = model.caption(image, length="short")
                 results.append({
                     "index": i,
                     "caption": result.get("caption", ""),
