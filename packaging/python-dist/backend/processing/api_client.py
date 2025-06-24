@@ -9,6 +9,7 @@ import requests
 import base64
 import json
 import os
+import time
 from typing import List, Dict, Any, Optional, Union
 from PIL import Image
 import io
@@ -27,56 +28,91 @@ class ContentCacheAPIClient:
         self.session.timeout = 30
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[Any, Any]:
-        """Make HTTP request to the API server."""
+        """Make HTTP request to the API server with retry logic."""
         url = f"{self.base_url}{endpoint}"
         
         print(f"🌐 Making {method} request to: {url}")
         
-        try:
-            # Add a reasonable timeout if not specified
-            if 'timeout' not in kwargs:
-                kwargs['timeout'] = 30
+        max_retries = 2
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries + 1):  # 0, 1, 2 (3 total attempts)
+            try:
+                # Add a reasonable timeout if not specified
+                if 'timeout' not in kwargs:
+                    kwargs['timeout'] = 30
+                    
+                response = requests.request(method, url, **kwargs)
                 
-            response = requests.request(method, url, **kwargs)
-            
-            print(f"📡 Response status: {response.status_code}")
-            print(f"📊 Response size: {len(response.content)} bytes")
-            
-            response.raise_for_status()
-            return response.json()
-            
-        except requests.exceptions.ConnectionError as e:
-            error_msg = f"Connection failed to {url}: {str(e)}"
-            print(f"🔌 {error_msg}")
-            logger.error(error_msg)
-            raise Exception(error_msg)
-            
-        except requests.exceptions.Timeout as e:
-            error_msg = f"Request timeout to {url}: {str(e)}"
-            print(f"⏱️ {error_msg}")
-            logger.error(error_msg)
-            raise Exception(error_msg)
-            
-        except requests.exceptions.HTTPError as e:
-            error_msg = f"HTTP error {response.status_code} from {url}: {str(e)}"
-            print(f"❌ {error_msg}")
-            if response.content:
-                print(f"📄 Error response body: {response.content[:500]}")
-            logger.error(error_msg)
-            raise Exception(error_msg)
-            
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Request failed to {url}: {str(e)}"
-            print(f"🚫 {error_msg}")
-            logger.error(error_msg)
-            raise Exception(error_msg)
-            
-        except json.JSONDecodeError as e:
-            error_msg = f"Invalid JSON response from {url}: {str(e)}"
-            print(f"📄 {error_msg}")
-            print(f"📄 Response content: {response.content[:500]}")
-            logger.error(error_msg)
-            raise Exception(error_msg)
+                print(f"📡 Response status: {response.status_code}")
+                print(f"📊 Response size: {len(response.content)} bytes")
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except (requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout, 
+                    requests.exceptions.HTTPError) as e:
+                
+                if attempt < max_retries:
+                    print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
+                    print(f"⏱️ Waiting {retry_delay} seconds before retry...")
+                    
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # Final attempt failed - handle different error types
+                    if isinstance(e, requests.exceptions.ConnectionError):
+                        error_msg = f"Connection failed to {url} after {max_retries + 1} attempts: {str(e)}"
+                        print(f"🔌 {error_msg}")
+                        print(f"💡 This usually means the Railway API server is down or unreachable")
+                    elif isinstance(e, requests.exceptions.Timeout):
+                        error_msg = f"Request timeout to {url} after {max_retries + 1} attempts: {str(e)}"
+                        print(f"⏱️ {error_msg}")
+                        print(f"💡 The API server may be overloaded or experiencing issues")
+                    elif isinstance(e, requests.exceptions.HTTPError):
+                        error_msg = f"HTTP error {response.status_code} from {url} after {max_retries + 1} attempts: {str(e)}"
+                        print(f"❌ {error_msg}")
+                        if response.content:
+                            print(f"📄 Error response body: {response.content[:500]}")
+                        print(f"💡 The API server returned an error - check Railway deployment logs")
+                    
+                    logger.error(error_msg)
+                    
+                    # Notify user about API failure
+                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
+                    print(f"🔧 Please check your Railway API deployment and try again")
+                    
+                    raise Exception(error_msg)
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries:
+                    print(f"⚠️ Request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
+                    print(f"⏱️ Waiting {retry_delay} seconds before retry...")
+                    
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    error_msg = f"Request failed to {url} after {max_retries + 1} attempts: {str(e)}"
+                    print(f"🚫 {error_msg}")
+                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                    
+            except json.JSONDecodeError as e:
+                if attempt < max_retries:
+                    print(f"⚠️ Invalid JSON response (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
+                    print(f"⏱️ Waiting {retry_delay} seconds before retry...")
+                    
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    error_msg = f"Invalid JSON response from {url} after {max_retries + 1} attempts: {str(e)}"
+                    print(f"📄 {error_msg}")
+                    print(f"📄 Response content: {response.content[:500]}")
+                    print(f"🚨 API ERROR: Processing will be stopped due to repeated API failures")
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
     
     def health_check(self) -> Dict[str, Any]:
         """Check API server health and service availability."""

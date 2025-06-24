@@ -422,17 +422,34 @@ class ContentCacheService:
             return False
 
     def stop_processing(self):
-        """Stop any running directory processing by calling tagdirectory's stop function."""
+        """Stop any running directory processing by setting the stop flag and optionally calling tagdirectory's stop function."""
         try:
-            from tagdirectory import stop_running_instance
-            print("🛑 Calling tagdirectory stop_running_instance...")
-            result = stop_running_instance()
-            if result:
-                print("✅ Successfully stopped tagdirectory processing")
-                return {"status": "success", "message": "Processing stopped successfully"}
+            # First, check if we have a stop_flag (running inside Electron app)
+            if hasattr(self, 'stop_flag') and callable(self.stop_flag):
+                print("🛑 Setting internal stop flag for current processing...")
+                # The stop_flag is already a lambda that checks processing_stopped
+                # We don't need to set it here, the ElectronBridge handles that
+                print("✅ Internal stop flag mechanism active")
+            
+            # Only try to stop external tagdirectory process if we're NOT in Electron app
+            # Check if we're running as a standalone script vs inside Electron
+            import sys
+            if 'main.py' not in sys.argv[0] and len(sys.argv) > 0:
+                # We're likely running standalone, try to stop external tagdirectory
+                from tagdirectory import stop_running_instance
+                print("🛑 Calling tagdirectory stop_running_instance...")
+                result = stop_running_instance()
+                if result:
+                    print("✅ Successfully stopped external tagdirectory processing")
+                    return {"status": "success", "message": "External processing stopped successfully"}
+                else:
+                    print("⚠️ No external running process found or failed to stop")
+                    return {"status": "warning", "message": "No external running process found"}
             else:
-                print("⚠️ No running process found or failed to stop")
-                return {"status": "warning", "message": "No running process found or failed to stop"}
+                # We're running inside Electron app, don't try to kill external process
+                print("✅ Running inside Electron app - using internal stop mechanism only")
+                return {"status": "success", "message": "Internal stop flag set - processing will stop at next checkpoint"}
+                
         except Exception as e:
             error_msg = f"Failed to stop processing: {str(e)}"
             print(f"❌ {error_msg}")

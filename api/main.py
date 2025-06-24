@@ -446,6 +446,12 @@ async def openai_transcribe_audio(request: AudioTranscriptionRequest):
 async def openai_audio_analysis(request: AudioAnalysisRequest):
     """Analyze audio segments using GPT-4o with built-in prompt and function calling."""
     try:
+        logger.info(f"Starting audio analysis with {len(request.segments)} segments")
+        
+        # Validate input data
+        if not request.segments:
+            raise HTTPException(status_code=400, detail="No audio segments provided")
+        
         # Built-in prompt for audio analysis
         base_prompt = f"Analyze audio data and provide summary + keywords.\n\nData: {json.dumps(request.segments, indent=2)}\n"
         
@@ -453,6 +459,12 @@ async def openai_audio_analysis(request: AudioAnalysisRequest):
         if request.filename_info and request.filename_info.get("is_audio_file"):
             title = request.filename_info.get("title", "")
             base_prompt += f"\nFilename: '{title}' (use for context if relevant)\n"
+            logger.info(f"Processing audio file: {title}")
+        
+        # Check if OpenAI client is available
+        if not openai_client:
+            logger.error("OpenAI client not initialized")
+            raise HTTPException(status_code=503, detail="OpenAI client not available")
         
         # Built-in function schema
         function_def = {
@@ -475,6 +487,7 @@ async def openai_audio_analysis(request: AudioAnalysisRequest):
             }
         }
         
+        logger.info("Making OpenAI API call for audio analysis")
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -485,13 +498,26 @@ async def openai_audio_analysis(request: AudioAnalysisRequest):
             max_tokens=400
         )
         
+        logger.info("OpenAI API call completed successfully")
+        
         # Extract the structured JSON output from API response
         if response.choices[0].message.tool_calls:
             function_args = response.choices[0].message.tool_calls[0].function.arguments
-            return {
-                "result": function_args,
-                "usage": response.usage.model_dump() if response.usage else None
-            }
+            # Parse the JSON string to ensure it's valid JSON
+            try:
+                parsed_result = json.loads(function_args)
+                return {
+                    "result": parsed_result,
+                    "usage": response.usage.model_dump() if response.usage else None
+                }
+            except json.JSONDecodeError as json_error:
+                logger.error(f"Failed to parse OpenAI function response as JSON: {json_error}")
+                logger.error(f"Raw function_args: {function_args}")
+                # Return the raw string if JSON parsing fails
+                return {
+                    "result": function_args,
+                    "usage": response.usage.model_dump() if response.usage else None
+                }
         else:
             raise HTTPException(status_code=500, detail="No tool call found in OpenAI response")
             
