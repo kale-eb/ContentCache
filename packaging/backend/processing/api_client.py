@@ -15,6 +15,8 @@ from PIL import Image
 import io
 import logging
 
+# Set up logging with reduced verbosity 
+logging.basicConfig(level=logging.WARNING)  # Only show warnings and errors
 logger = logging.getLogger(__name__)
 
 class ContentCacheAPIClient:
@@ -61,6 +63,8 @@ class ContentCacheAPIClient:
         """Make HTTP request to the API server with retry logic."""
         url = f"{self.base_url}{endpoint}"
         
+        logger.info(f"🌐 API REQUEST: {method} {url}")
+        logger.info(f"📋 Request kwargs: {list(kwargs.keys())}")
         print(f"🌐 Making {method} request to: {url}")
         
         max_retries = 2
@@ -70,16 +74,22 @@ class ContentCacheAPIClient:
             try:
                 # Add a reasonable timeout if not specified
                 if 'timeout' not in kwargs:
-                    kwargs['timeout'] = 30    
+                    kwargs['timeout'] = 30
+                
+                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries + 1} for {method} {url}")
                 response = requests.request(method, url, **kwargs)
                 
+                logger.info(f"📡 Response status: {response.status_code}")
+                logger.info(f"📊 Response size: {len(response.content) if response.content else 0} bytes")
                 print(f"📡 Response status: {response.status_code}")
                 print(f"📊 Response size: {len(response.content) if response.content else 0} bytes")
                 
                 if response.status_code == 200:
+                    logger.info(f"✅ API request successful: {method} {endpoint}")
                     return response.json()
                 else:
                     error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                    logger.warning(f"⚠️ API request failed with status {response.status_code}: {error_msg}")
                     if attempt < max_retries:
                         print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                         print(f"⏱️ Waiting {retry_delay} seconds before retry...")
@@ -87,6 +97,7 @@ class ContentCacheAPIClient:
                         continue
                     else:
                         # Final failure - trigger stop processing
+                        logger.error(f"❌ API request failed after {max_retries + 1} attempts: {error_msg}")
                         print(f"❌ API request failed after {max_retries + 1} attempts: {error_msg}")
                         print(f"🛑 Triggering stop processing due to repeated API failures")
                         self._trigger_stop_processing("API failed after 3 attempts")
@@ -374,16 +385,23 @@ class ContentCacheAPIClient:
         Returns:
             Dict with 'results' key containing list of results
         """
+        logger.info(f"🌙 MOONDREAM BATCH: Processing {len(image_paths)} images")
+        logger.info(f"🌙 Image paths: {image_paths[:3]}{'...' if len(image_paths) > 3 else ''}")
+        
         images_base64 = []
-        for image_path in image_paths:
+        for i, image_path in enumerate(image_paths):
+            logger.info(f"🌙 Encoding image {i+1}/{len(image_paths)}: {image_path}")
             with open(image_path, 'rb') as f:
                 image_data = f.read()
                 encoded = base64.b64encode(image_data).decode('utf-8')
                 images_base64.append(encoded)
         
         payload = {"images_base64": images_base64}
+        logger.info(f"🌙 Sending batch request with {len(images_base64)} encoded images")
         
-        return self._make_request('POST', '/api/moondream/batch', json=payload)
+        result = self._make_request('POST', '/api/moondream/batch', json=payload)
+        logger.info(f"🌙 Moondream batch result: {len(result.get('results', []))} results returned")
+        return result
     
     # ============================================================================
     # GOOGLE MAPS METHODS

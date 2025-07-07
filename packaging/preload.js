@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   
   // System operations
   getSystemStatus: () => ipcRenderer.invoke("get-system-status").catch(console.error),
+  startSearchServer: () => ipcRenderer.invoke("start-search-server").catch(console.error),
   
   // File system operations
   openFile: (filePath) => ipcRenderer.invoke("open-file", filePath).catch(console.error),

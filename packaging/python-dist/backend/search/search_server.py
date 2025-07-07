@@ -67,7 +67,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 def kill_processes_on_port(port):
-    """Kill any existing processes running on the specified port."""
+    """Kill any existing processes running on the specified port (except this process)."""
     try:
         print(f"🔍 Checking for existing processes on port {port}...")
         
@@ -77,20 +77,33 @@ def kill_processes_on_port(port):
         
         if result.returncode == 0 and result.stdout.strip():
             pids = result.stdout.strip().split('\n')
+            current_pid = os.getpid()
             print(f"🔄 Found {len(pids)} process(es) on port {port}: {', '.join(pids)}")
+            print(f"🔍 Current process PID: {current_pid}")
             
+            killed_any = False
             for pid in pids:
                 try:
                     pid_int = int(pid.strip())
+                    
+                    # Don't kill our own process!
+                    if pid_int == current_pid:
+                        print(f"⚠️ Skipping current process {pid_int} (this search server)")
+                        continue
+                    
                     print(f"🛑 Killing process {pid_int}...")
                     os.kill(pid_int, signal.SIGTERM)
                     print(f"✅ Killed process {pid_int}")
+                    killed_any = True
                 except (ValueError, ProcessLookupError, PermissionError) as e:
                     print(f"⚠️ Could not kill process {pid}: {e}")
             
-            # Wait a moment for processes to terminate
-            time.sleep(1)
-            print(f"✅ Port {port} cleanup completed")
+            if killed_any:
+                # Wait a moment for processes to terminate
+                time.sleep(1)
+                print(f"✅ Port {port} cleanup completed")
+            else:
+                print(f"✅ No other processes to kill on port {port}")
         else:
             print(f"✅ No existing processes found on port {port}")
             
@@ -159,6 +172,8 @@ class ContentCacheSearchServer:
                     # New filtering parameters
                     date_filter = request.args.get('date_filter', '')
                     location_filter = request.args.get('location_filter', '')
+                    # Pagination parameters
+                    offset = int(request.args.get('offset', 0))
                 else:
                     data = request.get_json() or {}
                     query = data.get('query', '')
@@ -167,9 +182,22 @@ class ContentCacheSearchServer:
                     # New filtering parameters
                     date_filter = data.get('date_filter', '')
                     location_filter = data.get('location_filter', '')
+                    # Pagination parameters
+                    offset = data.get('offset', 0)
                 
                 if not query:
                     return jsonify({'error': 'No query provided'}), 400
+                
+                # Check if this is a location/date-only search (no meaningful text query)
+                is_filter_only_search = self._is_filter_only_search(query, date_filter, location_filter)
+                
+                if is_filter_only_search:
+                    print(f"🔍 Detected filter-only search - skipping embedding search")
+                    # Handle filter-only search without embedding search
+                    results = self._perform_filter_only_search(
+                        content_type, date_filter, location_filter, top_k, offset
+                    )
+                    return jsonify(results)
                 
                 # Check if manual filters are provided
                 has_manual_filters = bool(date_filter.strip() or location_filter.strip())
@@ -1182,6 +1210,190 @@ class ContentCacheSearchServer:
         except Exception as e:
             print(f"⚠️ Date filtering error: {e}")
             return results
+
+    def _is_filter_only_search(self, query: str, date_filter: str, location_filter: str) -> bool:
+        """
+        Determine if this is a filter-only search (location/date only without meaningful text query).
+        
+        Returns True if:
+        - Query is empty or very short
+        - At least one filter (date or location) is provided
+        - Query contains only common filter words
+        """
+        query_stripped = query.strip().lower()
+        
+        # Check if we have any filters
+        has_filters = bool(date_filter.strip() or location_filter.strip())
+        
+        if not has_filters:
+            return False
+        
+        # Empty or very short query with filters = filter-only search
+        if len(query_stripped) <= 2:
+            return True
+        
+        # Check if query contains only common filter-related words that don't need semantic search
+        filter_only_words = {
+            'in', 'at', 'from', 'on', 'during', 'near', 'around', 'by', 'within',
+            'location', 'date', 'time', 'place', 'where', 'when', 'videos', 'images', 
+            'photos', 'files', 'content', 'media', 'all', 'any', 'show', 'find'
+        }
+        
+        query_words = set(query_stripped.split())
+        meaningful_words = query_words - filter_only_words
+        
+        # If no meaningful words remain after removing filter words, it's filter-only
+        return len(meaningful_words) == 0
+
+    def _perform_filter_only_search(self, content_type: str = 'all', date_filter: str = '', 
+                                   location_filter: str = '', top_k: int = 20, offset: int = 0) -> Dict[str, Any]:
+        """
+        Perform search using only location/date filters without embedding search.
+        Returns top results sorted by file modification time (newest first).
+        """
+        print(f"🔍 Filter-only search: type={content_type}, date='{date_filter}', location='{location_filter}', limit={top_k}, offset={offset}")
+        
+        # Get all metadata for the requested content types
+        search_types = ['video', 'text', 'audio', 'image'] if content_type == 'all' else [content_type]
+        
+        all_results = []
+        
+        for ctype in search_types:
+            for file_path, metadata in self.content_metadata[ctype].items():
+                result = {
+                    'file_path': file_path,
+                    'content_type': ctype,
+                    'type': ctype,
+                    'filename': os.path.basename(file_path),
+                    'score': 1.0,  # No similarity score for filter-only
+                    'similarity_score': 1.0,
+                    'search_type': 'filter_only'
+                }
+                
+                # Add metadata content
+                if ctype == 'video':
+                    summary = metadata.get('video_summary', '')
+                    result['summary'] = summary[:200] + '...' if len(summary) > 200 else summary
+                    result['content'] = result['summary']
+                    result['tags'] = metadata.get('tags', {})
+                elif ctype == 'text':
+                    summary = metadata.get('analysis', {}).get('summary', '')
+                    result['summary'] = summary
+                    result['content'] = summary
+                    result['file_type'] = metadata.get('file_type', '')
+                elif ctype in ['image', 'audio']:
+                    analysis = metadata.get('analysis', '')
+                    result['summary'] = analysis[:200] + '...' if len(analysis) > 200 else analysis
+                    result['content'] = result['summary']
+                
+                # Add file modification time for sorting
+                try:
+                    if os.path.exists(file_path):
+                        result['mtime'] = os.path.getmtime(file_path)
+                    else:
+                        result['mtime'] = 0
+                except:
+                    result['mtime'] = 0
+                
+                all_results.append(result)
+        
+        print(f"📊 Found {len(all_results)} total items before filtering")
+        
+        # Apply filters
+        filtered_results = all_results
+        
+        # Apply date filter if provided
+        if date_filter.strip():
+            date_matched = []
+            for result in filtered_results:
+                if self._check_date_match_simple(result, date_filter.strip()):
+                    date_matched.append(result)
+            filtered_results = date_matched
+            print(f"📅 After date filter: {len(filtered_results)} items")
+        
+        # Apply location filter if provided
+        if location_filter.strip():
+            location_matched = []
+            for result in filtered_results:
+                if self._check_location_match_simple(result, location_filter.strip()):
+                    location_matched.append(result)
+            filtered_results = location_matched
+            print(f"📍 After location filter: {len(filtered_results)} items")
+        
+        # Sort by modification time (newest first)
+        filtered_results.sort(key=lambda x: x.get('mtime', 0), reverse=True)
+        
+        # Apply pagination
+        total_results = len(filtered_results)
+        paginated_results = filtered_results[offset:offset + top_k]
+        
+        print(f"📋 Returning {len(paginated_results)} results (offset={offset}, total={total_results})")
+        
+        return {
+            'results': paginated_results,
+            'total_results': total_results,
+            'offset': offset,
+            'limit': top_k,
+            'has_more': offset + top_k < total_results,
+            'is_filter_only': True,
+            'applied_filters': {
+                'date': date_filter.strip() if date_filter.strip() else None,
+                'location': location_filter.strip() if location_filter.strip() else None,
+                'content_type': content_type
+            }
+        }
+
+    def _check_date_match_simple(self, result: Dict, date_filter: str) -> bool:
+        """Simple date matching for filter-only searches."""
+        if not date_filter:
+            return True
+            
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Get date from metadata
+            date_recorded = metadata.get('metadata', {}).get('date_recorded')
+            if date_recorded and date_recorded != 'None':
+                return date_filter in date_recorded
+            
+            # Try extracting date from filename
+            import re
+            date_match = re.search(r'(\d{4})[_-]?(\d{2})[_-]?(\d{2})', file_path)
+            if date_match:
+                file_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+                return date_filter in file_date
+        
+        return False
+
+    def _check_location_match_simple(self, result: Dict, location_filter: str) -> bool:
+        """Simple location matching for filter-only searches."""
+        if not location_filter:
+            return True
+            
+        file_path = result['file_path']
+        content_type = result['content_type']
+        
+        if file_path in self.content_metadata[content_type]:
+            metadata = self.content_metadata[content_type][file_path]
+            
+            # Check location in metadata
+            location_data = metadata.get('metadata', {}).get('location')
+            if not location_data or location_data == 'None':
+                # For images, check the 'coordinates' field as well
+                location_data = metadata.get('coordinates')
+            
+            # Check if location_filter appears in location text
+            if isinstance(location_data, str) and location_data not in ['None', '']:
+                return location_filter.lower() in location_data.lower()
+            elif isinstance(location_data, dict):
+                # Check if it's a place name or coordinates
+                location_text = str(location_data)
+                return location_filter.lower() in location_text.lower()
+        
+        return False
 
     def run(self, debug=False):
         """Start the Flask server."""

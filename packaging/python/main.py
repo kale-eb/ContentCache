@@ -1,11 +1,91 @@
 #!/usr/bin/env python3
+"""
+ContentCache Main Entry Point
+
+CRITICAL: Environment isolation must happen BEFORE any imports
+to prevent conflicts with system NumPy 2.x and other incompatible packages.
+"""
+
+# STEP 1: Setup isolated environment BEFORE any imports
 import sys
-import json
 import os
 from pathlib import Path
 
-# Import the unified service
-from unified_service import ContentCacheService
+def setup_isolated_environment():
+    """Setup isolated Python environment to avoid system package conflicts."""
+    print("🔧 Setting up isolated Python environment...")
+    
+    # Get the app cache directory
+    platform_name = os.uname().sysname if hasattr(os, 'uname') else 'Unknown'
+    if platform_name == 'Darwin':  # macOS
+        app_cache = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'silk.ai')
+    elif platform_name == 'Windows' or os.name == 'nt':
+        app_cache = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'silk.ai')
+    else:  # Linux and others
+        app_cache = os.path.join(os.path.expanduser('~'), '.config', 'silk.ai')
+    
+    user_base = os.path.join(app_cache, 'python_packages')
+    user_site_packages = os.path.join(user_base, 'lib', 'python', 'site-packages')
+    
+    print(f"📦 Using isolated packages from: {user_site_packages}")
+    
+    # Add our isolated packages to the FRONT of sys.path (highest priority)
+    if user_site_packages not in sys.path:
+        sys.path.insert(0, user_site_packages)
+        print(f"✅ Added {user_site_packages} to sys.path[0]")
+    
+    # Also add to PYTHONPATH for child processes
+    current_pythonpath = os.environ.get('PYTHONPATH', '')
+    if user_site_packages not in current_pythonpath:
+        new_pythonpath = user_site_packages + (os.pathsep + current_pythonpath if current_pythonpath else '')
+        os.environ['PYTHONPATH'] = new_pythonpath
+        print(f"✅ Updated PYTHONPATH")
+    
+    # Set user base for pip installations
+    os.environ['PYTHONUSERBASE'] = user_base
+    os.environ['PYTHONNOUSERSITE'] = '0'  # Allow user site packages
+    
+    print(f"🔧 Python path priority: {sys.path[:3]}...")
+    
+    # Test if we can import numpy from the correct location
+    try:
+        import numpy as np
+        print(f"✅ Using NumPy {np.__version__} from: {np.__file__}")
+        
+        # Verify it's NumPy 1.x
+        major_version = int(np.__version__.split('.')[0])
+        if major_version >= 2:
+            print(f"⚠️ WARNING: Found NumPy {np.__version__} (2.x) - may cause OpenCV issues")
+        else:
+            print(f"✅ NumPy {np.__version__} (1.x) - compatible with OpenCV")
+            
+    except ImportError as e:
+        print(f"❌ Could not import NumPy: {e}")
+        print(f"💡 Dependencies may need to be installed to: {user_site_packages}")
+
+# CRITICAL: Run environment setup before any other imports
+try:
+    setup_isolated_environment()
+except Exception as e:
+    print(f"⚠️ Isolated environment setup failed: {e}")
+    print("🔄 Falling back to system packages...")
+    # Continue with system packages - no sys.path modification
+
+# STEP 2: Now safe to import other modules
+import json
+import time
+import threading
+import queue
+
+# Import the ContentCache service (this will now use isolated environment or system fallback)
+try:
+    from unified_service import ContentCacheService
+    print("✅ Successfully imported ContentCacheService")
+except ImportError as e:
+    print(f"❌ Failed to import ContentCacheService: {e}")
+    print("💡 This may indicate missing dependencies")
+    # Let the error propagate - app cannot function without this
+    raise
 
 class ElectronBridge:
     """Bridge between Electron frontend and ContentCache unified service"""
@@ -84,21 +164,38 @@ class ElectronBridge:
                     # Process directory
                     self.send_output(f"Processing directory: {file_path}")
                     result = self.service.process_directory(file_path)
+                    
+                    # Check if directory processing was stopped
+                    if result.get('results', {}).get('status') == 'stopped':
+                        self.processing_stopped = True
+                        results.append(result)
+                        self.send_output("Directory processing was stopped")
+                        break
                 else:
                     # Process single file
                     self.send_output(f"Processing file: {os.path.basename(file_path)}")
                     result = self.service.process_file(file_path)
+                    
+                    # Check if file processing was stopped
+                    if result.get('stopped', False):
+                        self.processing_stopped = True
+                        results.append(result)
+                        self.send_output("File processing was stopped")
+                        break
                 
                 results.append(result)
                 
-                # Send progress update
+                # Send progress update with file type info
                 progress = ((i + 1) / total_files) * 100
+                file_type = self.service.detect_file_type(file_path)
                 self.send_json_response({
                     "type": "batch_progress",
                     "progress": progress,
                     "completed": i + 1,
                     "total": total_files,
-                    "current_file": os.path.basename(file_path)
+                    "current_file": os.path.basename(file_path),
+                    "current_file_type": file_type,
+                    "current_result": result.get('success', False)
                 })
                 
             except Exception as e:
@@ -110,22 +207,35 @@ class ElectronBridge:
                 results.append(error_result)
                 self.send_output(f"Error processing {file_path}: {str(e)}")
         
-        # Send final results
+        # Send final results with detailed statistics
+        successful_files = [r for r in results if r.get('success', False)]
+        skipped_files = [r for r in results if r.get('skipped', False)]
+        failed_files = [r for r in results if not r.get('success', False) and not r.get('skipped', False)]
+        
         final_status = "stopped" if self.processing_stopped else "complete"
         self.send_json_response({
             "type": "processing_complete",
             "results": results,
             "total_processed": len(results),
-            "successful": len([r for r in results if r.get('success', False)]),
-            "status": final_status
+            "successful": len(successful_files),
+            "skipped": len(skipped_files),
+            "failed": len(failed_files),
+            "status": final_status,
+            "summary": {
+                "total_files": total_files,
+                "processed_new": len(successful_files),
+                "skipped_existing": len(skipped_files),
+                "failed": len(failed_files),
+                "stopped_early": self.processing_stopped
+            }
         })
         
         return results
     
     def search_videos(self, query: str, content_types: list = None, top_k: int = 20, 
-                     date_filter: str = '', location_filter: str = ''):
-        """Search content using the unified service with optional filters"""
-        self.send_output(f"Searching for: '{query}' with content_types={content_types}, top_k={top_k}, date_filter='{date_filter}', location_filter='{location_filter}'")
+                     date_filter: str = '', location_filter: str = '', offset: int = 0):
+        """Search content using the unified service with optional filters and pagination"""
+        self.send_output(f"Searching for: '{query}' with content_types={content_types}, top_k={top_k}, date_filter='{date_filter}', location_filter='{location_filter}', offset={offset}")
         
         try:
             # Check search server status first
@@ -141,9 +251,9 @@ class ElectronBridge:
                 })
                 return
             
-            # Perform search with filters
+            # Perform search with filters and pagination
             self.send_output("Calling search_content...")
-            results = self.service.search_content(query, content_types, top_k, date_filter, location_filter)
+            results = self.service.search_content(query, content_types, top_k, date_filter, location_filter, offset)
             self.send_output(f"Search results received: {results}")
             
             if results.get('success', False):
@@ -161,15 +271,29 @@ class ElectronBridge:
                     })
                     self.send_output(f"Found {results.get('total_found', 0)} results in {len(results.get('buckets', {}))} buckets")
                 else:
-                    # Return flat results
-                    self.send_json_response({
+                    # Return flat results with pagination info
+                    response_data = {
                         "type": "search_results",
                         "query": query,
                         "results": results.get('results', []),
-                            "has_buckets": False,
-                        "total_found": len(results.get('results', []))
-                    })
-                    self.send_output(f"Found {len(results.get('results', []))} results")
+                        "has_buckets": False,
+                        "total_found": results.get('total_found', len(results.get('results', [])))
+                    }
+                    
+                    # Add pagination info if available
+                    if 'offset' in results:
+                        response_data['offset'] = results['offset']
+                        response_data['limit'] = results.get('limit', top_k)
+                        response_data['has_more'] = results.get('has_more', False)
+                        response_data['is_filter_only'] = results.get('is_filter_only', False)
+                        response_data['applied_filters'] = results.get('applied_filters', {})
+                    
+                    self.send_json_response(response_data)
+                    
+                    if results.get('is_filter_only', False):
+                        self.send_output(f"Found {results.get('total_found', 0)} filter-only results (showing {len(results.get('results', []))} from offset {offset})")
+                    else:
+                        self.send_output(f"Found {len(results.get('results', []))} results")
             else:
                 self.send_json_response({
                     "type": "search_error",
@@ -259,17 +383,25 @@ class ElectronBridge:
         try:
             # Set the flag for current processing loop
             self.processing_stopped = True
-            self.send_output("Stop flag set")
+            self.send_output("🛑 Stop flag set in ElectronBridge")
             
             # Also call the tagdirectory stop function for any running instances
             result = self.service.stop_processing()
-            self.send_output(f"Tagdirectory stop result: {result}")
+            self.send_output(f"🛑 Tagdirectory stop result: {result}")
             
-            self.send_json_response({
-                "type": "stop_complete",
-                "message": "Processing stop initiated",
-                "tagdirectory_result": result
-            })
+            # Check if the stop was successful
+            if result.get("status") == "success":
+                self.send_json_response({
+                    "type": "stop_complete",
+                    "message": "Processing stop initiated successfully",
+                    "tagdirectory_result": result
+                })
+            else:
+                self.send_json_response({
+                    "type": "stop_error",
+                    "error": result.get("message", "Unknown error stopping processing"),
+                    "tagdirectory_result": result
+                })
             
         except Exception as e:
             error_msg = f"Failed to stop processing: {str(e)}"
@@ -288,54 +420,96 @@ class ElectronBridge:
             "message": "Processing stopped due to repeated API failures"
             })
 
+def stdin_reader_thread(command_queue):
+    """Thread function to read commands from stdin and put them in a queue"""
+    try:
+        for line in sys.stdin:
+            try:
+                command = json.loads(line.strip())
+                command_queue.put(command)
+            except json.JSONDecodeError as e:
+                command_queue.put({"action": "error", "message": f"Invalid JSON: {str(e)}"})
+            except Exception as e:
+                command_queue.put({"action": "error", "message": f"Error reading command: {str(e)}"})
+    except Exception as e:
+        command_queue.put({"action": "error", "message": f"Stdin reader error: {str(e)}"})
+
 def main():
-    """Main loop for handling Electron commands"""
+    """Main loop for handling Electron commands with non-blocking stdin"""
     bridge = ElectronBridge()
     
     # Send initial status
     bridge.get_system_status()
     
-    # Listen for commands from Electron
-    for line in sys.stdin:
-        try:
-            command = json.loads(line.strip())
-            action = command.get('action')
-            
-            if action == 'process':
-                files = command.get('files', [])
-                bridge.send_output(f"DEBUG: Received files: {files}, type: {type(files)}")
-                bridge.process_files(files)
+    # Create a queue for commands and start stdin reader thread
+    command_queue = queue.Queue()
+    stdin_thread = threading.Thread(target=stdin_reader_thread, args=(command_queue,), daemon=True)
+    stdin_thread.start()
+    
+    bridge.send_output("🚀 ContentCache service ready - using threaded command processing")
+    
+    # Main processing loop
+    try:
+        while True:
+            # Check for new commands (non-blocking)
+            try:
+                # Wait up to 0.1 seconds for a command
+                command = command_queue.get(timeout=0.1)
                 
-            elif action == 'search':
-                query = command.get('query', '')
-                content_types = command.get('content_types')
-                top_k = command.get('top_k', 20)
-                date_filter = command.get('date_filter', '')
-                location_filter = command.get('location_filter', '')
-                bridge.send_output(f"Received search command: query='{query}', content_types={content_types}, top_k={top_k}, date_filter='{date_filter}', location_filter='{location_filter}'")
-                bridge.search_videos(query, content_types, top_k, date_filter, location_filter)
+                action = command.get('action')
+                bridge.send_output(f"📨 Received command: {action}")
                 
-            elif action == 'chat':
-                message = command.get('message', '')
-                bridge.ai_chat(message)
+                if action == 'process':
+                    files = command.get('files', [])
+                    bridge.send_output(f"DEBUG: Received files: {files}, type: {type(files)}")
+                    bridge.process_files(files)
+                    
+                elif action == 'search':
+                    query = command.get('query', '')
+                    content_types = command.get('content_types')
+                    top_k = command.get('top_k', 20)
+                    date_filter = command.get('date_filter', '')
+                    location_filter = command.get('location_filter', '')
+                    offset = command.get('offset', 0)
+                    bridge.send_output(f"Received search command: query='{query}', content_types={content_types}, top_k={top_k}, date_filter='{date_filter}', location_filter='{location_filter}', offset={offset}")
+                    bridge.search_videos(query, content_types, top_k, date_filter, location_filter, offset)
+                    
+                elif action == 'chat':
+                    message = command.get('message', '')
+                    bridge.ai_chat(message)
+                    
+                elif action == 'status':
+                    bridge.get_system_status()
+                    
+                elif action == 'stop':
+                    bridge.send_output("🛑 Setting stop flag...")
+                    bridge.processing_stopped = True
+                    bridge.send_output("Processing stop flag set")
+                    
+                elif action == 'stop_enhanced':
+                    bridge.send_output("🛑 Enhanced stop command received...")
+                    bridge.stop_processing_enhanced()
+                    
+                elif action == 'error':
+                    bridge.send_output(f"Error: {command.get('message', 'Unknown error')}")
+                    
+                else:
+                    bridge.send_output(f"Unknown action: {action}")
+                    
+            except queue.Empty:
+                # No command received, continue loop
+                # This allows the loop to continue and check for stop flags even during processing
+                time.sleep(0.05)  # Small sleep to prevent excessive CPU usage
+                continue
                 
-            elif action == 'status':
-                bridge.get_system_status()
-                
-            elif action == 'stop':
-                bridge.processing_stopped = True
-                bridge.send_output("Processing stopped")
-                
-            elif action == 'stop_enhanced':
-                bridge.stop_processing_enhanced()
-                
-            else:
-                bridge.send_output(f"Unknown action: {action}")
-                
-        except json.JSONDecodeError as e:
-            bridge.send_output(f"Error: Invalid JSON command - {str(e)}")
-        except Exception as e:
-            bridge.send_output(f"Error: {str(e)}")
+    except KeyboardInterrupt:
+        bridge.send_output("🛑 Service interrupted by user")
+    except Exception as e:
+        bridge.send_output(f"❌ Service error: {str(e)}")
+        import traceback
+        bridge.send_output(f"Traceback: {traceback.format_exc()}")
+    
+    bridge.send_output("🔚 ContentCache service shutting down")
 
 if __name__ == "__main__":
     main()

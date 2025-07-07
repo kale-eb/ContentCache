@@ -55,8 +55,22 @@ export function AppSidebar({ activeTab, onTabChange, ...props }: AppSidebarProps
     <Sidebar variant="inset" {...props} className="border-r border-gray-200 bg-white">
       <SidebarHeader className="border-b border-gray-100 p-6">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl flex items-center justify-center shadow-sm">
-            <Video className="w-6 h-6 text-white" />
+          <div className="w-10 h-10 rounded-xl overflow-hidden shadow-sm flex items-center justify-center bg-gradient-to-br from-blue-500 to-purple-600">
+            <svg 
+              width={24} 
+              height={24} 
+              viewBox="0 0 24 24" 
+              fill="none" 
+              className="text-white"
+            >
+              <path 
+                d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round"
+              />
+            </svg>
           </div>
           <div>
             <h2 className="font-bold text-gray-900 text-lg">Silk.ai</h2>

@@ -15,6 +15,8 @@ from PIL import Image
 import io
 import logging
 
+# Set up logging with reduced verbosity 
+logging.basicConfig(level=logging.WARNING)  # Only show warnings and errors
 logger = logging.getLogger(__name__)
 
 class ContentCacheAPIClient:
@@ -67,18 +69,18 @@ class ContentCacheAPIClient:
         retry_delay = 10  # Updated to 10 seconds
         
         for attempt in range(max_retries + 1):  # 0, 1, 2 (3 total attempts)
-        try:
-            # Add a reasonable timeout if not specified
-            if 'timeout' not in kwargs:
-                kwargs['timeout'] = 30
+            try:
+                # Add a reasonable timeout if not specified
+                if 'timeout' not in kwargs:
+                    kwargs['timeout'] = 30
+                    
+                response = requests.request(method, url, **kwargs)
                 
-            response = requests.request(method, url, **kwargs)
-            
-            print(f"📡 Response status: {response.status_code}")
+                print(f"📡 Response status: {response.status_code}")
                 print(f"📊 Response size: {len(response.content) if response.content else 0} bytes")
-            
+                
                 if response.status_code == 200:
-            return response.json()
+                    return response.json()
                 else:
                     error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                     if attempt < max_retries:
@@ -92,8 +94,8 @@ class ContentCacheAPIClient:
                         print(f"🛑 Triggering stop processing due to repeated API failures")
                         self._trigger_stop_processing("API failed after 3 attempts")
                         raise requests.exceptions.RequestException(f"API failed after {max_retries + 1} attempts: {error_msg}")
-            
-        except requests.exceptions.RequestException as e:
+                        
+            except requests.exceptions.RequestException as e:
                 if attempt < max_retries:
                     print(f"⚠️ API request failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
                     print(f"⏱️ Waiting {retry_delay} seconds before retry...")

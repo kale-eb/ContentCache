@@ -5,7 +5,15 @@ from skimage.metrics import structural_similarity as ssim
 import numpy as np
 from pathlib import Path
 import shutil
-from natsort import natsorted
+try:
+    from natsort import natsorted
+except ImportError:
+    # Fallback natural sorting if natsort is not available
+    def natsorted(iterable):
+        import re
+        def natural_key(text):
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+        return sorted(iterable, key=natural_key)
 import subprocess
 import gc
 from PIL import Image

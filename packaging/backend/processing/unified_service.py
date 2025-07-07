@@ -21,9 +21,8 @@ from pathlib import Path
 from datetime import datetime
 import requests
 
-# Add current directory to sys.path for imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, current_dir)
+# All modules are in the same directory, no sys.path manipulation needed
+# The main app uses python/unified_service.py, not this file
 
 # Import API client for connectivity testing
 try:
@@ -38,7 +37,7 @@ try:
     from videotagger import tag_video
     from audioprocessor import process_audio  
     from imageprocessor import process_image
-    from textprocessor import process_text_file
+    from textprocessor import TextProcessor
 except ImportError as e:
     print(f"Warning: Some processing modules not available: {e}")
 
@@ -148,7 +147,7 @@ class ContentCacheService:
                 
             elif file_type == "text":
                 self._emit_progress("text_processing", 40, f"Processing text document...")
-                result = process_text_file(abs_path)
+                result = self.text_processor.process_file(abs_path)
                 
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")
@@ -264,6 +263,11 @@ class ContentCacheService:
         try:
             # Use the existing tagdirectory function which now handles progress callbacks
             results = batch_process_files(directory_path, progress_callback=self._emit_progress, stop_flag=self.stop_flag)
+            
+            # After all directory processing is complete, trigger a one-time search server refresh
+            if results and results.get("processed", 0) > 0:
+                self._emit_progress("search_refresh", 95, "Updating search index with new content...")
+                self._refresh_search_server_final()
             
             return {
                 "directory_path": directory_path,
@@ -410,9 +414,31 @@ class ContentCacheService:
     def _refresh_search_server(self):
         """Trigger search server to refresh embeddings after new content is processed."""
         try:
-            response = requests.post(f"{self.search_server_url}/refresh", timeout=10)
+            # PERFORMANCE FIX: Don't refresh after every single file during batch processing
+            # Instead, skip refresh during active processing to prevent server crashes
+            print("🔄 Skipping search server refresh during active processing (performance optimization)")
+            print("💡 Search server will auto-refresh when search is performed")
+            return True
+            
+            # Original code commented out to prevent crashes:
+            # response = requests.post(f"{self.search_server_url}/refresh", timeout=10)
+            # if response.status_code == 200:
+            #     print("✅ Search server refreshed with new embeddings")
+            #     return True
+            # else:
+            #     print(f"⚠️ Search server refresh failed: {response.status_code}")
+            #     return False
+        except Exception as e:
+            print(f"⚠️ Could not refresh search server: {e}")
+            return False
+
+    def _refresh_search_server_final(self):
+        """Trigger search server refresh at the end of batch processing."""
+        try:
+            print("🔄 Performing final search server refresh after batch processing...")
+            response = requests.post(f"{self.search_server_url}/refresh", timeout=30)
             if response.status_code == 200:
-                print("✅ Search server refreshed with new embeddings")
+                print("✅ Search server refreshed with all new embeddings")
                 return True
             else:
                 print(f"⚠️ Search server refresh failed: {response.status_code}")
@@ -422,16 +448,33 @@ class ContentCacheService:
             return False
 
     def stop_processing(self):
-        """Stop any running directory processing by setting the stop flag."""
+        """Stop any running directory processing by creating stop signal and calling tagdirectory stop function."""
         try:
-            print("🛑 Stop processing called - relying on stop_flag mechanism")
+            print("🛑 Stop processing called - creating stop signal and calling tagdirectory functions")
             
-            # The actual stopping happens via the stop_flag lambda in the ElectronBridge
-            # which checks self.processing_stopped. We don't need to do anything complex here.
+            # Import the tagdirectory stop functions
+            from tagdirectory import stop_running_instance, create_stop_signal
             
-            print("✅ Stop mechanism active - processing will stop at next checkpoint")
-            return {"status": "success", "message": "Stop signal sent - processing will stop at next checkpoint"}
+            # First, create a stop signal file so current processing sees it
+            stop_signal_result = create_stop_signal()
+            print(f"🛑 Stop signal file created: {stop_signal_result}")
+            
+            # Also call stop_running_instance for any external processes
+            external_stop_result = stop_running_instance()
+            print(f"🛑 External process stop result: {external_stop_result}")
+            
+            print("✅ Stop signals sent via both stop file and process termination")
+            return {
+                "status": "success", 
+                "message": "Stop signals sent via both stop file and process termination", 
+                "stop_signal_created": stop_signal_result,
+                "external_processes": external_stop_result
+            }
                 
+        except ImportError as e:
+            error_msg = f"Could not import tagdirectory stop functions: {str(e)}"
+            print(f"❌ {error_msg}")
+            return {"status": "error", "message": error_msg}
         except Exception as e:
             error_msg = f"Failed to stop processing: {str(e)}"
             print(f"❌ {error_msg}")

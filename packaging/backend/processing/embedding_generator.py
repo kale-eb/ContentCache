@@ -29,8 +29,8 @@ from rank_bm25 import BM25Okapi
 # Local imports
 from config import get_embeddings_cache_dir, get_models_cache_dir
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with reduced verbosity
+logging.basicConfig(level=logging.WARNING)  # Only show warnings and errors
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
@@ -132,21 +132,92 @@ class EmbeddingGenerator:
             return texts
         
         if content_type == "video":
-            # Extract from video summary and tags
+            # COMPREHENSIVE video indexing (matching search server)
+            # 1. Video summary
             if "video_summary" in metadata:
-                summary_texts = safe_extract_text(metadata["video_summary"])
-                text_parts.extend(summary_texts)
+                summary = metadata["video_summary"]
+                if summary and summary != "Video analysis unavailable due to API server error.":
+                    summary_texts = safe_extract_text(summary)
+                    text_parts.extend(summary_texts)
             
+            # 2. All tag categories
             if "tags" in metadata:
                 tag_texts = safe_extract_text(metadata["tags"])
                 text_parts.extend(tag_texts)
+            
+            # 3. Frame captions (if available)
+            if "frame_captions" in metadata:
+                frame_caption_texts = safe_extract_text(metadata["frame_captions"])
+                text_parts.extend(frame_caption_texts)
+            
+            # 4. Audio summary/transcript
+            if "audio_summary" in metadata:
+                audio_summary = metadata["audio_summary"]
+                if isinstance(audio_summary, dict):
+                    # Extract text from audio analysis dict
+                    audio_text = audio_summary.get('text', '') or audio_summary.get('transcript', '') or audio_summary.get('summary', '')
+                    if audio_text:
+                        text_parts.append(str(audio_text))
+                elif isinstance(audio_summary, str):
+                    text_parts.append(audio_summary)
+            
+            # 5. OCR text from frames (prominent text)
+            text_data = metadata.get('text_data', {})
+            if text_data:
+                prominent_text = text_data.get('prominent_text', [])
+                if isinstance(prominent_text, list):
+                    text_parts.extend(prominent_text)
+                elif isinstance(prominent_text, str):
+                    text_parts.append(prominent_text)
+            
+            # 6. Enhanced vision analysis
+            if "vision_analysis" in metadata:
+                vision_texts = safe_extract_text(metadata["vision_analysis"])
+                text_parts.extend(vision_texts)
+            
+            # 7. Location information
+            location_info = metadata.get('metadata', {}).get('location', '')
+            if location_info and str(location_info).lower() not in ['none', 'null', '']:
+                text_parts.append(str(location_info))
+            
+            # 8. Included description
+            included_description = metadata.get('metadata', {}).get('included_description', '')
+            if included_description and str(included_description).lower() not in ['none', 'null', '']:
+                text_parts.append(str(included_description))
         
         elif content_type == "image":
-            # Extract from image analysis
+            # COMPREHENSIVE image indexing (matching search server)
+            # 1. Image summary
+            if "image_summary" in metadata:
+                summary_texts = safe_extract_text(metadata["image_summary"])
+                text_parts.extend(summary_texts)
+            
+            # 2. All tag categories (CRITICAL - includes objects like "passport")
+            if "tags" in metadata:
+                tag_texts = safe_extract_text(metadata["tags"])
+                text_parts.extend(tag_texts)
+            
+            # 3. OCR text (if available)
+            if "ocr_text" in metadata:
+                ocr_texts = safe_extract_text(metadata["ocr_text"])
+                text_parts.extend(ocr_texts)
+            
+            # 4. Location information
+            location_info = metadata.get('metadata', {}).get('location', '')
+            if location_info and str(location_info).lower() not in ['none', 'null', '']:
+                text_parts.append(str(location_info))
+            
+            # 5. Included description
+            included_description = metadata.get('metadata', {}).get('included_description', '')
+            if included_description and str(included_description).lower() not in ['none', 'null', '']:
+                text_parts.append(str(included_description))
+            
+            # 6. Backward compatibility - legacy analysis field
             if "analysis" in metadata:
                 analysis_texts = safe_extract_text(metadata["analysis"])
                 text_parts.extend(analysis_texts)
             
+            # 7. Legacy summary field  
             if "summary" in metadata:
                 summary_texts = safe_extract_text(metadata["summary"])
                 text_parts.extend(summary_texts)
@@ -162,15 +233,33 @@ class EmbeddingGenerator:
                 text_parts.extend(summary_texts)
         
         elif content_type == "text":
-            # Extract from text analysis
+            # COMPREHENSIVE text indexing (matching search server)
+            # 1. Analysis summary
             if "analysis" in metadata:
-                analysis_texts = safe_extract_text(metadata["analysis"])
-                text_parts.extend(analysis_texts)
+                analysis = metadata["analysis"]
+                if isinstance(analysis, dict):
+                    # Extract summary
+                    summary = analysis.get('summary', '')
+                    if summary:
+                        text_parts.append(summary)
+                    
+                    # Include key topics extracted by AI  
+                    key_topics = analysis.get('key_topics', [])
+                    if isinstance(key_topics, list):
+                        text_parts.extend(key_topics)
+                else:
+                    analysis_texts = safe_extract_text(analysis)
+                    text_parts.extend(analysis_texts)
             
-            # Add content preview if available
+            # 2. Actual document content preview (HUGE for search!)
             if "content_preview" in metadata:
                 preview_texts = safe_extract_text(metadata["content_preview"])
                 text_parts.extend(preview_texts)
+            
+            # 3. Legacy content field
+            if "content" in metadata:
+                content_texts = safe_extract_text(metadata["content"])
+                text_parts.extend(content_texts)
         
         # Join all text parts and clean up
         # Filter out empty strings and ensure all are strings

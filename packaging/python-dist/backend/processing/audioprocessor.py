@@ -6,7 +6,7 @@ import signal
 import time
 from functools import wraps
 from pathlib import Path
-from config import get_models_cache_dir
+from config import get_models_cache_dir, get_ffmpeg_path, get_ffprobe_path
 
 # Audio processing imports
 import tensorflow as tf
@@ -491,69 +491,7 @@ def cleanup_audio_processing(result=None, segments_out=None, filename_info=None,
         cleanup_temp_files()
         return 0.0
 
-def get_ffprobe_path():
-    """Get the path to the bundled ffprobe binary or system ffprobe."""
-    # Try bundled ffprobe first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffprobe
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffprobe'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffprobe'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffprobe'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffprobe'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffprobe'),
-    ]
-    
-    audio_debug(f"🔍 Looking for bundled ffprobe from base directory: {current_dir}")
-    
-    for bundled_ffprobe in possible_paths:
-        audio_debug(f"🔍 Checking ffprobe at: {bundled_ffprobe}")
-        if os.path.exists(bundled_ffprobe):
-            audio_print(f"✅ Found bundled ffprobe: {bundled_ffprobe}")
-            return bundled_ffprobe
-        else:
-            audio_debug(f"❌ Not found at: {bundled_ffprobe}")
-    
-    # Fallback to system ffprobe
-    audio_print("⚠️ Bundled ffprobe not found, using system ffprobe")
-    return 'ffprobe'
-
-def get_ffmpeg_path():
-    """Get the path to the bundled ffmpeg binary or system ffmpeg."""
-    # Try bundled ffmpeg first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffmpeg
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffmpeg'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffmpeg'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffmpeg'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffmpeg'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffmpeg'),
-    ]
-    
-    audio_debug(f"🔍 Looking for bundled ffmpeg from base directory: {current_dir}")
-    
-    for bundled_ffmpeg in possible_paths:
-        audio_debug(f"🔍 Checking ffmpeg at: {bundled_ffmpeg}")
-        if os.path.exists(bundled_ffmpeg):
-            audio_print(f"✅ Found bundled ffmpeg: {bundled_ffmpeg}")
-            return bundled_ffmpeg
-        else:
-            audio_debug(f"❌ Not found at: {bundled_ffmpeg}")
-    
-    # Fallback to system ffmpeg
-    audio_print("⚠️ Bundled ffmpeg not found, using system ffmpeg")
-    return 'ffmpeg'
+# FFmpeg functions are now imported from centralized config
 
 def process_audio_fallback(file_path):
     """Fallback audio processing when Whisper is not available"""
@@ -658,44 +596,27 @@ def process_audio_fallback(file_path):
 
 def setup_ffmpeg_path():
     """Set up the PATH environment variable to include bundled ffmpeg directory"""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binaries
-    possible_dirs = [
-        # Packaged app structure: backend/processing -> ../../binaries/
-        os.path.join(current_dir, '..', '..', 'binaries'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries'),
-    ]
-    
-    audio_debug(f"🔍 Setting up ffmpeg PATH from base directory: {current_dir}")
-    
-    for binaries_dir in possible_dirs:
-        ffmpeg_path = os.path.join(binaries_dir, 'ffmpeg')
-        audio_debug(f"🔍 Checking for bundled ffmpeg at: {ffmpeg_path}")
+    try:
+        # Use centralized config to get ffmpeg path
+        ffmpeg_path = get_ffmpeg_path()
         
-        if os.path.exists(ffmpeg_path):
-            audio_print(f"✅ Found bundled ffmpeg directory: {binaries_dir}")
-            
-            # Add the binaries directory to PATH if it's not already there
-            current_path = os.environ.get('PATH', '')
-            if binaries_dir not in current_path:
-                os.environ['PATH'] = f"{binaries_dir}{os.pathsep}{current_path}"
-                audio_print(f"✅ Added {binaries_dir} to PATH for Whisper")
-            else:
-                audio_debug(f"Directory already in PATH: {binaries_dir}")
-            
-            return True
+        # Extract the directory containing ffmpeg
+        binaries_dir = os.path.dirname(ffmpeg_path)
+        
+        # Add the binaries directory to PATH if it's not already there
+        current_path = os.environ.get('PATH', '')
+        if binaries_dir not in current_path:
+            os.environ['PATH'] = f"{binaries_dir}{os.pathsep}{current_path}"
+            audio_print(f"✅ Added {binaries_dir} to PATH for Whisper")
         else:
-            audio_debug(f"❌ Not found at: {ffmpeg_path}")
-    
-    audio_print("⚠️ No bundled ffmpeg found, Whisper will use system ffmpeg (if available)")
-    return False
+            audio_debug(f"Directory already in PATH: {binaries_dir}")
+        
+        audio_print(f"✅ Set up ffmpeg PATH: {ffmpeg_path}")
+        return True
+        
+    except Exception as e:
+        audio_print(f"⚠️ Failed to set up ffmpeg PATH: {e}")
+        return False
 
 # Import Whisper and set up ffmpeg path
 try:

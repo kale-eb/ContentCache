@@ -612,7 +612,29 @@ export function DashboardTab() {
     // Sort results by similarity score (highest to lowest)
     const sortedResults = [...searchResults].sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0))
     const buckets = organizeBuckets(sortedResults)
-    const bucketEntries = Object.entries(buckets)
+    
+    // Define bucket priority order (most important to least important)
+    const bucketPriority = [
+      "📅📍 Date & Location Match",
+      "📅 Date Match Only", 
+      "📅 Date Match",
+      "📍 Location Match Only",
+      "📍 Location Match", 
+      "📄 Other Results",
+      "All Results"
+    ]
+    
+    // Sort bucket entries by priority order
+    const bucketEntries = Object.entries(buckets).sort(([nameA], [nameB]) => {
+      const priorityA = bucketPriority.indexOf(nameA)
+      const priorityB = bucketPriority.indexOf(nameB)
+      
+      // If not found in priority list, put at end
+      const effectivePriorityA = priorityA === -1 ? bucketPriority.length : priorityA
+      const effectivePriorityB = priorityB === -1 ? bucketPriority.length : priorityB
+      
+      return effectivePriorityA - effectivePriorityB
+    })
     
     // If only one bucket (no filters), show simple grid
     if (bucketEntries.length === 1 && bucketEntries[0][0] === "All Results") {

@@ -4,75 +4,32 @@ from skimage.metrics import structural_similarity as ssim
 import numpy as np
 from pathlib import Path
 import shutil
-from natsort import natsorted
+import logging
+import sys
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('framesegmentation.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
+try:
+    from natsort import natsorted
+except ImportError:
+    # Fallback natural sorting if natsort is not available
+    def natsorted(iterable):
+        import re
+        def natural_key(text):
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+        return sorted(iterable, key=natural_key)
 import subprocess
 import gc
 from PIL import Image
-from config import get_temp_frames_dir
-
-def get_ffmpeg_path():
-    """Get the path to the bundled ffmpeg binary or system ffmpeg."""
-    # Try bundled ffmpeg first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffmpeg
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffmpeg'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffmpeg'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffmpeg'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffmpeg'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffmpeg'),
-    ]
-    
-    print(f"🔍 Looking for bundled ffmpeg from base directory: {current_dir}")
-    
-    for bundled_ffmpeg in possible_paths:
-        print(f"🔍 Checking ffmpeg at: {bundled_ffmpeg}")
-        if os.path.exists(bundled_ffmpeg):
-            print(f"✅ Found bundled ffmpeg: {bundled_ffmpeg}")
-            return bundled_ffmpeg
-        else:
-            print(f"❌ Not found at: {bundled_ffmpeg}")
-    
-    # Fallback to system ffmpeg
-    print("⚠️ Bundled ffmpeg not found, using system ffmpeg")
-    return 'ffmpeg'
-
-def get_ffprobe_path():
-    """Get the path to the bundled ffprobe binary or system ffprobe."""
-    # Try bundled ffprobe first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffprobe
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffprobe'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffprobe'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffprobe'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffprobe'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffprobe'),
-    ]
-    
-    print(f"🔍 Looking for bundled ffprobe from base directory: {current_dir}")
-    
-    for bundled_ffprobe in possible_paths:
-        print(f"🔍 Checking ffprobe at: {bundled_ffprobe}")
-        if os.path.exists(bundled_ffprobe):
-            print(f"✅ Found bundled ffprobe: {bundled_ffprobe}")
-            return bundled_ffprobe
-        else:
-            print(f"❌ Not found at: {bundled_ffprobe}")
-    
-    # Fallback to system ffprobe
-    print("⚠️ Bundled ffprobe not found, using system ffprobe")
-    return 'ffprobe'
+from config import get_temp_frames_dir, get_ffmpeg_path, get_ffprobe_path
 
 def get_length(filename):
     result = subprocess.run([get_ffprobe_path(), "-v", "error", "-show_entries",

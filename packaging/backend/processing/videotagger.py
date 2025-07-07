@@ -1,9 +1,10 @@
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+# Removed problematic sys.path.append - all imports are from same directory or standard libs
 
 from framesegmentation import split_frames
 from config import cleanup_temp_frames
+import framestagging
 from framestagging import (
     analyze_keyframes_with_gpt4o_vision, 
     process_frames_with_moondream_api,
@@ -87,6 +88,19 @@ api_client.use_api_server()  # Uses environment variable CONTENTCACHE_API_URL or
 try:
     # Suppress EasyOCR warnings during initialization
     import logging
+    import sys
+    
+    # Setup logging for videotagger with rotation to prevent large files
+    from logging.handlers import RotatingFileHandler
+    logging.basicConfig(
+        level=logging.WARNING,  # Only show warnings and errors, not INFO
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler('videotagger.log', maxBytes=1024*1024, backupCount=2)  # 1MB max, 2 backups
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
     logging.getLogger('easyocr').setLevel(logging.ERROR)
     easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)  # Set verbose=False
     print("✅ EasyOCR initialized for video text extraction")
@@ -767,26 +781,42 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     3. Combine results for final analysis
     """
     
+    logger.info(f"🎬 STARTING VIDEO PROCESSING: {vid_path}")
+    logger.info(f"📋 Parameters: moondream={use_moondream}, moondream_api={use_moondream_api}, compress={compress_frames}, max_pixels={max_pixels}")
+    
     # Set up API client with stop callback
     try:
         client = api_client.get_api_client()
+        logger.info("✅ API client configured successfully")
         print("✅ API client configured")
     except Exception as e:
+        logger.error(f"⚠️ Could not configure API client: {e}")
         print(f"⚠️ Could not configure API client: {e}")
     
     memory_start = get_memory_usage()
     
+    logger.info(f"🔍 Starting CONCURRENT video analysis for: {vid_path}")
+    logger.info(f"🧵 Using multithreading for: OCR, GPT-4o Vision, Moondream API, Audio")
+    logger.info(f"📊 Initial memory usage: {memory_start:.1f} MB")
     print(f"🔍 Starting CONCURRENT video analysis for: {vid_path}")
     print(f"🧵 Using multithreading for: OCR, GPT-4o Vision, Moondream API, Audio")
     print(f"📊 Initial memory usage: {memory_start:.1f} MB")
     
     # Step 1: Extract frames
+    logger.info("📽️ Step 1: Extracting frames...")
     print("Step 1: Extracting frames...")
-    frames_dir, frame_metadata = split_frames(vid_path)
+    
+    try:
+        frames_dir, frame_metadata = split_frames(vid_path)
+        logger.info(f"📁 Frame extraction result: frames_dir={frames_dir}, metadata_keys={list(frame_metadata.keys()) if frame_metadata else 'None'}")
+    except Exception as e:
+        logger.error(f"❌ Frame extraction failed with exception: {e}")
+        raise
     
     # Validate frame extraction was successful
     if frames_dir is None or not os.path.exists(frames_dir):
         error_msg = "Frame extraction failed: frames directory not created"
+        logger.error(f"❌ {error_msg}")
         print(f"❌ {error_msg}")
         raise RuntimeError(error_msg)
         
@@ -828,19 +858,26 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     def process_ocr():
         """Extract text from keyframes using local EasyOCR"""
         try:
+            logger.info("🔤 [OCR Thread] Starting text extraction (local EasyOCR)...")
+            logger.info(f"🔤 [OCR Thread] Processing {len(selected_frames)} frames")
             print("🔤 [OCR Thread] Starting text extraction (local EasyOCR)...")
+            
             text_data = extract_prominent_text_from_frames(selected_frames)
             
+            logger.info(f"✅ [OCR Thread] Text extraction complete: {len(text_data.get('prominent_text', []))} prominent texts")
             print(f"✅ [OCR Thread] Text extraction complete: {len(text_data.get('prominent_text', []))} prominent texts")
             return text_data
             
         except Exception as e:
+            logger.error(f"❌ [OCR Thread] Text extraction failed: {e}")
             print(f"❌ [OCR Thread] Text extraction failed: {e}")
             return {'prominent_text': [], 'frame_details': {}}
     
     def process_moondream():
         """Process frames with Moondream API"""
         try:
+            logger.info("🌙 [Moondream Thread] Starting API processing...")
+            logger.info(f"🌙 [Moondream Thread] Processing {len(selected_frames)} frames")
             print("🌙 [Moondream Thread] Starting API processing...")
             
             # Use API server for Moondream batch processing
@@ -848,34 +885,42 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
             
             if api_response and 'results' in api_response:
                 frame_captions = api_response['results']
+                logger.info(f"✅ [Moondream Thread] API processing complete: {len(frame_captions)} results")
                 print(f"✅ [Moondream Thread] API processing complete: {len(frame_captions)} results")
                 return frame_captions
             else:
+                logger.warning("⚠️ [Moondream Thread] Invalid API response for Moondream processing")
                 raise Exception("Invalid API response for Moondream processing")
                 
         except Exception as e:
+            logger.warning(f"⚠️ [Moondream Thread] API server failed, falling back to local processing: {e}")
             print(f"⚠️ [Moondream Thread] API server failed, falling back to local processing: {e}")
             # Fallback to original function
             try:
                 frame_captions = process_frames_with_moondream_api(selected_frames)
+                logger.info(f"✅ [Moondream Thread] Fallback processing complete")
                 print(f"✅ [Moondream Thread] Fallback processing complete")
                 return frame_captions
             except Exception as fallback_error:
+                logger.error(f"❌ [Moondream Thread] Both API and fallback failed: {fallback_error}")
                 print(f"❌ [Moondream Thread] Both API and fallback failed: {fallback_error}")
                 return []
     
     def process_audio():
         """Extract and analyze audio using Whisper + GPT-4o"""
         try:
+            logger.info("🎵 [Audio Thread] Starting audio processing...")
             print("🎵 [Audio Thread] Starting audio processing...")
             
             # Use audioanalyzer for Whisper transcription + OpenAI analysis
             audio_summary = audioanalyzer.analyze_audio_with_openai(vid_path)
             
+            logger.info(f"✅ [Audio Thread] Audio processing complete")
             print(f"✅ [Audio Thread] Audio processing complete")
             return audio_summary
             
         except Exception as e:
+            logger.error(f"❌ [Audio Thread] Audio processing failed: {e}")
             print(f"❌ [Audio Thread] Audio processing failed: {e}")
             return None
     
@@ -1011,7 +1056,7 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     
     return result_copy
 
-def cleanup_video_processing(selected_frames=None, text_data=None, audio_summary=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
+def cleanup_video_processing(selected_frames=None, text_data=None, frame_captions=None, audio_summary=None, video_metadata=None, result=None, parsed=None, processed_location=None, frame_files=None, total_keyframes=None, num_to_send=None, frame_metadata=None):
     """
     Cleanup function for video processing to prevent memory leaks.
     
@@ -1027,6 +1072,7 @@ def cleanup_video_processing(selected_frames=None, text_data=None, audio_summary
     cleanup_vars = {
         'selected_frames': selected_frames,
         'text_data': text_data,
+        'frame_captions': frame_captions,
         'audio_summary': audio_summary,
         'video_metadata': video_metadata,
         'result': result,

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Search, Video, FileText, Upload, Filter, Grid, List, FolderOpen, File, ExternalLink, ChevronDown, ChevronUp, Calendar, MapPin } from "lucide-react"
+import { Search, Video, FileText, Upload, Filter, Grid, List, FolderOpen, File, ExternalLink, ChevronDown, ChevronUp, Calendar, MapPin, RefreshCw } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -134,6 +134,9 @@ export function DashboardTab() {
   // Bucket expansion states
   const [expandedBuckets, setExpandedBuckets] = useState<Set<string>>(new Set())
   
+  // Search server refresh state
+  const [isRefreshingSearch, setIsRefreshingSearch] = useState(false)
+  
   const [stats, setStats] = useState({
     totalVideos: 0,
     totalImages: 0,
@@ -144,8 +147,14 @@ export function DashboardTab() {
   })
   const { toast } = useToast()
 
-  // Remove hardcoded results - using real search results now
-
+  // Pagination states
+  const [currentOffset, setCurrentOffset] = useState(0)
+  const [totalResults, setTotalResults] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isFilterOnly, setIsFilterOnly] = useState(false)
+  const [appliedFilters, setAppliedFilters] = useState<any>({})
+  
   // Fetch system status and stats (with rate limiting)
   const [lastFetchTime, setLastFetchTime] = useState(0)
   const fetchStats = async () => {
@@ -215,6 +224,16 @@ export function DashboardTab() {
               setIsSearching(false)
               setHasSearched(true)
               setIsSearchInProgress(false)
+              setIsLoadingMore(false)
+              
+              // Handle pagination data
+              if ('offset' in response) {
+                setCurrentOffset(response.offset || 0)
+                setTotalResults(response.total_found || 0)
+                setHasMore(response.has_more || false)
+                setIsFilterOnly(response.is_filter_only || false)
+                setAppliedFilters(response.applied_filters || {})
+              }
               
               // Handle both bucketed and flat results from server
               if (response.has_buckets && response.buckets) {
@@ -237,12 +256,24 @@ export function DashboardTab() {
                   description: `Found ${response.total_found || flatResults.length} results in ${Object.keys(response.buckets).length} categories for "${response.query}"`,
                 })
               } else {
-                // Server returned flat results
-                setSearchResults(response.results || [])
-              toast({
-                title: "Search Complete",
-                  description: `Found ${response.total_found || response.results?.length || 0} results for "${response.query}"`,
-              })
+                // Server returned flat results - handle pagination
+                const newResults = response.results || []
+                
+                if (response.offset > 0) {
+                  // This is "load more" - append to existing results
+                  setSearchResults(prev => [...prev, ...newResults])
+                  toast({
+                    title: "Loaded More Results",
+                    description: `Loaded ${newResults.length} additional results${response.is_filter_only ? ' (filter-only search)' : ''}`,
+                  })
+                } else {
+                  // This is a new search - replace results
+                  setSearchResults(newResults)
+                  toast({
+                    title: "Search Complete",
+                    description: `Found ${response.total_found || newResults.length} results${response.is_filter_only ? ' (filter-only search)' : ''} for "${response.query}"`,
+                  })
+                }
               }
               break
 
@@ -583,7 +614,29 @@ export function DashboardTab() {
     // Sort results by similarity score (highest to lowest)
     const sortedResults = [...searchResults].sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0))
     const buckets = organizeBuckets(sortedResults)
-    const bucketEntries = Object.entries(buckets)
+    
+    // Define bucket priority order (most important to least important)
+    const bucketPriority = [
+      "📅📍 Date & Location Match",
+      "📅 Date Match Only", 
+      "📅 Date Match",
+      "📍 Location Match Only",
+      "📍 Location Match", 
+      "📄 Other Results",
+      "All Results"
+    ]
+    
+    // Sort bucket entries by priority order
+    const bucketEntries = Object.entries(buckets).sort(([nameA], [nameB]) => {
+      const priorityA = bucketPriority.indexOf(nameA)
+      const priorityB = bucketPriority.indexOf(nameB)
+      
+      // If not found in priority list, put at end
+      const effectivePriorityA = priorityA === -1 ? bucketPriority.length : priorityA
+      const effectivePriorityB = priorityB === -1 ? bucketPriority.length : priorityB
+      
+      return effectivePriorityA - effectivePriorityB
+    })
     
     // If only one bucket (no filters), show simple grid
     if (bucketEntries.length === 1 && bucketEntries[0][0] === "All Results") {
@@ -677,16 +730,55 @@ export function DashboardTab() {
     )
   }
 
-  const handleSearch = async () => {
-    if (isSearchInProgress) {
+  // Detect if this is a filter-only search (location/date only without meaningful text query)
+  const isFilterOnlySearch = (query: string, dateFilter: string, locationFilter: string): boolean => {
+    const queryStripped = query.trim().toLowerCase()
+    
+    // Check if we have any filters
+    const hasFilters = Boolean(dateFilter.trim() || locationFilter.trim())
+    
+    if (!hasFilters) {
+      return false
+    }
+    
+    // Empty or very short query with filters = filter-only search
+    if (queryStripped.length <= 2) {
+      return true
+    }
+    
+    // Check if query contains only common filter-related words that don't need semantic search
+    const filterOnlyWords = new Set([
+      'in', 'at', 'from', 'on', 'during', 'near', 'around', 'by', 'within',
+      'location', 'date', 'time', 'place', 'where', 'when', 'videos', 'images', 
+      'photos', 'files', 'content', 'media', 'all', 'any', 'show', 'find'
+    ])
+    
+    const queryWords = new Set(queryStripped.split(/\s+/))
+    const meaningfulWords = new Set([...queryWords].filter(word => !filterOnlyWords.has(word)))
+    
+    // If no meaningful words remain after removing filter words, it's filter-only
+    return meaningfulWords.size === 0
+  }
+
+  const handleSearch = async (offset: number = 0, isLoadMore: boolean = false) => {
+    if (!isLoadMore && isSearchInProgress) {
       return
     }
     
     if (searchQuery.trim() && window.electronAPI) {
-      setIsSearchInProgress(true)
-      setIsSearching(true)
-      setHasSearched(false)
-      setSearchResults([])
+      if (!isLoadMore) {
+        setIsSearchInProgress(true)
+        setIsSearching(true)
+        setHasSearched(false)
+        setSearchResults([])
+        setCurrentOffset(0)
+        setTotalResults(0)
+        setHasMore(false)
+        setIsFilterOnly(false)
+        setAppliedFilters({})
+      } else {
+        setIsLoadingMore(true)
+      }
       
       // Add timeout to prevent infinite searching state
       const timeout = setTimeout(() => {
@@ -694,6 +786,7 @@ export function DashboardTab() {
         setHasSearched(true)
         setSearchTimeout(null)
         setIsSearchInProgress(false)
+        setIsLoadingMore(false)
         toast({
           title: "Search Timeout",
           description: "Search took too long. Please try again.",
@@ -709,7 +802,8 @@ export function DashboardTab() {
         const result = await window.electronAPI.searchVideos(searchQuery, { 
           content_types: contentTypes,
           date_filter: dateFilter.trim(),
-          location_filter: locationFilter.trim()
+          location_filter: locationFilter.trim(),
+          offset: offset
         })
         
         const filterDescription = [
@@ -720,8 +814,8 @@ export function DashboardTab() {
         ].filter(Boolean).join(" ")
         
       toast({
-        title: "Search Started",
-          description: `Searching for: ${filterDescription}`,
+        title: isLoadMore ? "Loading More..." : "Search Started",
+          description: isLoadMore ? "Loading additional results..." : `Searching for: ${filterDescription}`,
         })
       } catch (error) {
         clearTimeout(timeout)
@@ -729,6 +823,7 @@ export function DashboardTab() {
         setIsSearching(false)
         setHasSearched(true)
         setIsSearchInProgress(false)
+        setIsLoadingMore(false)
         toast({
           title: "Search Error",
           description: "Failed to start search",
@@ -738,16 +833,194 @@ export function DashboardTab() {
     }
   }
 
+  // New load more function
+  const handleLoadMore = () => {
+    if (hasMore && !isLoadingMore) {
+      const nextOffset = currentOffset + 20
+      setCurrentOffset(nextOffset)
+      handleSearch(nextOffset, true)
+    }
+  }
+
+  // Refresh search server embeddings
+  const handleRefreshSearchServer = async () => {
+    if (!stats.searchServerStatus) {
+      toast({
+        title: "Search Server Offline",
+        description: "The search server is not running. Start it first to refresh embeddings.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsRefreshingSearch(true)
+    
+    try {
+      const response = await fetch('http://localhost:5001/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        toast({
+          title: "Search Server Refreshed",
+          description: `Successfully refreshed embeddings. Status: ${result.status || 'Complete'}`,
+        })
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+    } catch (error) {
+      console.error('Failed to refresh search server:', error)
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      toast({
+        title: "Refresh Failed",
+        description: `Failed to refresh search server: ${errorMessage}`,
+        variant: "destructive",
+      })
+    } finally {
+      setIsRefreshingSearch(false)
+    }
+  }
+
+  // Start or refresh search server - handles both cases
+  const handleStartRefreshSearchServer = async () => {
+    setIsRefreshingSearch(true)
+    
+    try {
+      if (stats.searchServerStatus) {
+        // Server is online - refresh it
+        const response = await fetch('http://localhost:5001/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        })
+        
+        if (response.ok) {
+          const result = await response.json()
+          toast({
+            title: "Search Server Refreshed",
+            description: `Successfully refreshed embeddings. Status: ${result.status || 'Complete'}`,
+          })
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+      } else {
+        // Server is offline - try to start it using the Electron API
+        try {
+          if (window.electronAPI?.startSearchServer) {
+            await window.electronAPI.startSearchServer()
+            toast({
+              title: "Starting Search Server",
+              description: "Search server is starting up. Please wait a moment...",
+            })
+            
+            // Give the server time to start, then check status
+            setTimeout(() => {
+              fetchStats()
+            }, 3000)
+          } else {
+            // Fallback: try to ping the server first
+            const response = await fetch('http://localhost:5001/health', {
+              method: 'GET'
+            })
+            
+            if (response.ok) {
+              toast({
+                title: "Search Server Found",
+                description: "Search server is responding. Refreshing stats...",
+              })
+              fetchStats()
+            } else {
+              throw new Error('Search server not responding')
+            }
+          }
+        } catch (startError) {
+          // Final fallback: try to wake up the server with a refresh call
+          try {
+            const response = await fetch('http://localhost:5001/refresh', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            })
+            
+            if (response.ok) {
+              toast({
+                title: "Search Server Found",
+                description: "Search server responded and refreshed successfully!",
+              })
+              fetchStats()
+            } else {
+              throw new Error('Search server appears to be offline')
+            }
+          } catch (refreshError) {
+            throw new Error('Search server appears to be offline. Please check the logs or restart the application.')
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to start/refresh search server:', error)
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      
+      if (stats.searchServerStatus) {
+        toast({
+          title: "Refresh Failed",
+          description: `Failed to refresh search server: ${errorMessage}`,
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Start Failed",
+          description: `Failed to start search server: ${errorMessage}. The server may need to be manually started.`,
+          variant: "destructive",
+        })
+      }
+    } finally {
+      setIsRefreshingSearch(false)
+    }
+  }
+
   return (
     <div className="flex-1 space-y-8 p-8">
       {/* Header with prominent upload section */}
       <div className="space-y-6">
-        <div>
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">Dashboard</h1>
-          <p className="text-lg text-gray-600">Search and organize your video content with AI-powered tagging</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-4xl font-bold text-gray-900 mb-2">Dashboard</h1>
+            <p className="text-lg text-gray-600">Search and organize your video content with AI-powered tagging</p>
+          </div>
+          
+          {/* Search Server Control Button - Top Right Corner */}
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <p className="text-sm font-medium text-gray-600">Search Server</p>
+              <p className={`text-sm ${stats.searchServerStatus ? 'text-green-600' : 'text-red-600'}`}>
+                {stats.searchServerStatus ? 'Online' : 'Offline'}
+              </p>
+            </div>
+            <Button
+              onClick={handleStartRefreshSearchServer}
+              disabled={isRefreshingSearch}
+              className={`h-12 px-6 ${
+                stats.searchServerStatus 
+                  ? 'bg-blue-600 hover:bg-blue-700' 
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshingSearch ? 'animate-spin' : ''}`} />
+              {isRefreshingSearch 
+                ? 'Processing...' 
+                : stats.searchServerStatus 
+                  ? 'Refresh Server'
+                  : 'Start Server'
+              }
+            </Button>
+          </div>
         </div>
-
-
       </div>
 
       {/* Stats Cards */}
@@ -758,9 +1031,11 @@ export function DashboardTab() {
               <div>
                 <p className="text-sm font-medium text-gray-600">Total Videos</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">{stats.totalVideos.toLocaleString()}</p>
-                <p className="text-sm text-blue-600 mt-1">
-                  {stats.searchServerStatus ? "Server Online" : "Server Offline"}
-                </p>
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-sm text-blue-600">
+                    {stats.searchServerStatus ? "Server Online" : "Server Offline"}
+                  </p>
+                </div>
               </div>
               <div className="p-4 bg-blue-50 rounded-xl">
                 <Video className="w-7 h-7 text-blue-600" />
@@ -854,7 +1129,7 @@ export function DashboardTab() {
                 <Filter className="w-4 h-4 mr-2" />
                 Filters
               </Button>
-              <Button size="lg" className="h-14 px-8 bg-blue-600 hover:bg-blue-700" onClick={handleSearch}>
+              <Button size="lg" className="h-14 px-8 bg-blue-600 hover:bg-blue-700" onClick={() => handleSearch()}>
                 Search
               </Button>
             </div>
@@ -924,7 +1199,13 @@ export function DashboardTab() {
               <CardTitle className="text-xl text-gray-900">Search Results</CardTitle>
               <CardDescription>
                 {isSearching ? "Searching..." : 
-                 hasSearched ? `Found ${searchResults.length} results` : 
+                 hasSearched ? (
+                   totalResults > 0 ? (
+                     hasMore ? 
+                       `Showing ${searchResults.length} of ${totalResults} results` :
+                       `Found ${searchResults.length} results`
+                   ) : `Found ${searchResults.length} results`
+                 ) : 
                  "Enter a search query to find content"}
               </CardDescription>
             </div>
@@ -970,6 +1251,66 @@ export function DashboardTab() {
           ) : (
             <div className="w-full">
               {renderSearchResults()}
+              
+              {/* Load More Button */}
+              {hasMore && !isSearching && (
+                <div className="flex justify-center mt-8">
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    onClick={handleLoadMore}
+                    disabled={isLoadingMore}
+                    className="px-8"
+                  >
+                    {isLoadingMore ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin mr-2"></div>
+                        Loading More...
+                      </>
+                    ) : (
+                      <>
+                        Load More Videos
+                        {totalResults > 0 && (
+                          <span className="ml-2 text-sm text-gray-500">
+                            ({searchResults.length} of {totalResults})
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </Button>
+                </div>
+              )}
+              
+              {/* Filter Info for Filter-Only Searches */}
+              {isFilterOnly && searchResults.length > 0 && (
+                <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                  <div className="flex items-center gap-2 text-sm text-blue-800">
+                    <Filter className="w-4 h-4" />
+                    <span className="font-medium">Filter-only search</span>
+                    <span>-</span>
+                    <span>Results sorted by date (newest first), no similarity scoring</span>
+                  </div>
+                  {appliedFilters && Object.keys(appliedFilters).length > 0 && (
+                    <div className="flex items-center gap-2 mt-2">
+                      {appliedFilters.date && (
+                        <Badge variant="secondary" className="text-xs">
+                          Date: {appliedFilters.date}
+                        </Badge>
+                      )}
+                      {appliedFilters.location && (
+                        <Badge variant="secondary" className="text-xs">
+                          Location: {appliedFilters.location}
+                        </Badge>
+                      )}
+                      {appliedFilters.content_type && appliedFilters.content_type !== 'all' && (
+                        <Badge variant="secondary" className="text-xs">
+                          Type: {appliedFilters.content_type}
+                        </Badge>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               
               {/* Selection info */}
               {selectedItems.size > 0 && (

@@ -7,14 +7,19 @@ import psutil
 import time
 import atexit
 from datetime import datetime
+from pathlib import Path
 
 # Simple local imports since all files are in the same directory
 from config import (
     get_metadata_dir, get_video_metadata_path, get_audio_metadata_path,
     get_text_metadata_path, get_image_metadata_path, get_memory_log_path,
     get_failed_files_path, migrate_existing_metadata, cleanup_temp_frames,
-    print_directory_structure
+    print_directory_structure, setup_ffmpeg_paths
 )
+import audioanalyzer
+from imageprocessor import tag_image
+from videotagger import tag_video_smart_conflict_resolution
+from textprocessor import TextProcessor
 
 def get_memory_usage():
     """Get current memory usage in MB"""
@@ -149,6 +154,43 @@ def get_lock_file_path():
     """Get the path for the lock file in the metadata directory"""
     return os.path.join(get_metadata_dir(), "tagdirectory.lock")
 
+def get_stop_file_path():
+    """Get the path for the stop signal file in the metadata directory"""
+    return os.path.join(get_metadata_dir(), "tagdirectory.stop")
+
+def create_stop_signal():
+    """Create a stop signal file to indicate processing should stop"""
+    try:
+        stop_file = get_stop_file_path()
+        with open(stop_file, 'w') as f:
+            f.write(f"{datetime.now().isoformat()}\n")
+        print(f"🛑 Stop signal created: {stop_file}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to create stop signal: {e}")
+        return False
+
+def check_stop_signal():
+    """Check if a stop signal file exists"""
+    try:
+        stop_file = get_stop_file_path()
+        return os.path.exists(stop_file)
+    except Exception as e:
+        print(f"⚠️ Error checking stop signal: {e}")
+        return False
+
+def clear_stop_signal():
+    """Remove the stop signal file"""
+    try:
+        stop_file = get_stop_file_path()
+        if os.path.exists(stop_file):
+            os.remove(stop_file)
+            print(f"✅ Stop signal cleared: {stop_file}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error clearing stop signal: {e}")
+        return False
+
 def get_current_pid():
     """Get the current process ID"""
     return os.getpid()
@@ -211,12 +253,14 @@ def kill_existing_process(pid):
         return False
 
 def cleanup_on_exit():
-    """Clean up PID file on exit"""
+    """Clean up PID file and stop signals on exit"""
     try:
         if os.path.exists(get_pid_file_path()):
             os.remove(get_pid_file_path())
         if os.path.exists(get_lock_file_path()):
             os.remove(get_lock_file_path())
+        # Clear any stop signals when exiting normally
+        clear_stop_signal()
     except:
         pass
 
@@ -275,6 +319,11 @@ def check_status():
 
 def stop_running_instance():
     """Stop any running tagdirectory instance"""
+    print("🛑 stop_running_instance() called")
+    
+    # First, create a stop signal file to stop any currently running processing
+    stop_signal_created = create_stop_signal()
+    
     existing_pid = read_pid_file()
     
     if existing_pid:
@@ -285,15 +334,15 @@ def stop_running_instance():
                 print(f"✅ Process stopped successfully")
                 return True
             else:
-                print(f"❌ Failed to stop process")
-                return False
+                print(f"❌ Failed to stop process, but stop signal created")
+                return stop_signal_created
         else:
             print(f"⚠️  PID file exists but process is not running")
             cleanup_on_exit()
-            return True
+            return stop_signal_created
     else:
-        print(f"✅ No tagdirectory process is running")
-        return True
+        print(f"✅ No tagdirectory process is running, stop signal created")
+        return stop_signal_created
 
 def ensure_single_instance():
     """Ensure only one instance of tagdirectory.py is running"""
@@ -386,6 +435,33 @@ def should_retry_failed_file(file_path, max_attempts=3, failed_file=None):
     attempts = failed_files[abs_path].get("attempts", 0)
     return attempts < max_attempts
 
+def should_stop_processing(stop_flag=None):
+    """
+    Unified function to check if processing should stop.
+    Checks both callable stop_flag and persistent stop file.
+    
+    Args:
+        stop_flag: Optional callable that returns True when processing should stop
+        
+    Returns:
+        bool: True if processing should stop
+    """
+    # Check callable stop flag first
+    if stop_flag and callable(stop_flag):
+        try:
+            if stop_flag():
+                print("🛑 Stop requested via callable stop_flag")
+                return True
+        except Exception as e:
+            print(f"⚠️ Error checking stop_flag: {e}")
+    
+    # Check persistent stop file
+    if check_stop_signal():
+        print("🛑 Stop requested via stop signal file")
+        return True
+    
+    return False
+
 def load_metadata(filename):
         """Load metadata from JSON file, return empty dict if file doesn't exist"""
         try:
@@ -412,6 +488,29 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
         # Always print to console as well
         if stage == "directory_processing":
             print(f"📁 {progress:.1f}% - {message}")
+        else:
+            print(f"📊 {stage} - {progress:.1f}% - {message}")
+    
+    # Set up FFmpeg paths once at the beginning to avoid repeated detection
+    try:
+        setup_ffmpeg_paths()
+        print("✅ FFmpeg paths configured for all modules")
+    except Exception as e:
+        print(f"⚠️ Failed to set up FFmpeg paths: {e}")
+    
+    emit_progress("directory_processing", 0, f"Starting to process directory: {directory}")
+    
+    # Clear any existing stop signals when starting new processing
+    clear_stop_signal()
+    
+    # Check if stop was requested before we even start
+    if should_stop_processing(stop_flag):
+        emit_progress("directory_processing", 0, "Processing stopped before starting")
+        return {
+            "status": "stopped",
+            "message": "Processing was stopped before starting",
+            "results": []
+        }
     
     print("🚀 Starting ContentCache batch processing...")
     emit_progress("directory_processing", 0, f"Starting directory processing: {directory}")
@@ -465,10 +564,7 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
 
     # Import heavy modules only when actually processing
     print("📦 Loading processing modules...")
-    from videotagger import tag_video_smart_conflict_resolution
-    from imageprocessor import tag_image
-    from audioanalyzer import analyze_audio_with_openai
-    from textprocessor import TextProcessor
+    from audioprocessor import cleanup_audio_processing
     
     text_processor = TextProcessor()
     
@@ -495,7 +591,7 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
             text_processor.process_file(file_path)
             return "text"
         elif file_type == "audio":
-            result = analyze_audio_with_openai(file_path)
+            result = audioanalyzer.analyze_audio_with_openai(file_path)
             print(json.dumps(result, indent=2))
             return "audio"
         elif file_type == "image":
@@ -516,10 +612,9 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
     
     for root, _, files in os.walk(directory):
         # Check for stop signal during file collection
-        if stop_flag and callable(stop_flag) and stop_flag():
+        if should_stop_processing(stop_flag):
             print("⚠️ Processing stopped during file collection")
             emit_progress("directory_processing", 100, "Processing stopped by user")
-            stop_running_instance()
             return {"status": "stopped", "message": "Processing stopped during file collection"}
             
         for file in files:
@@ -552,10 +647,9 @@ def batch_process_files(directory, progress_callback=None, stop_flag=None):
     for file_index, (file_path, abs_path, file) in enumerate(files_to_process):
             
             # Check for stop signal at the beginning of each file processing
-            if stop_flag and callable(stop_flag) and stop_flag():
+            if should_stop_processing(stop_flag):
                 print(f"⚠️ Processing stopped by user after {stats['processed']} files")
                 emit_progress("directory_processing", 100, f"Processing stopped by user. Processed {stats['processed']} files.")
-                stop_running_instance()
                 return {
                     "status": "stopped",
                     "total_files": total_files,

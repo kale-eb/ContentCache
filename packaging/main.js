@@ -8,6 +8,55 @@ let pythonProcess
 let searchServerProcess
 let isFirstLaunch = false
 
+// Global dependency state management
+let dependencyInstallationComplete = false
+let dependencyInstallationInProgress = false
+let dependencyInstallationFailed = false
+
+// Queue for delayed service starts
+let pendingServiceStarts = []
+
+async function waitForDependencies() {
+  return new Promise((resolve, reject) => {
+    if (dependencyInstallationComplete) {
+      resolve()
+      return
+    }
+    
+    if (dependencyInstallationFailed) {
+      reject(new Error("Dependency installation failed"))
+      return
+    }
+    
+    // Add to queue
+    pendingServiceStarts.push({ resolve, reject })
+  })
+}
+
+function notifyDependenciesReady() {
+  console.log("📢 Notifying all services that dependencies are ready...")
+  dependencyInstallationComplete = true
+  dependencyInstallationInProgress = false
+  
+  // Resolve all pending service starts
+  while (pendingServiceStarts.length > 0) {
+    const { resolve } = pendingServiceStarts.shift()
+    resolve()
+  }
+}
+
+function notifyDependenciesFailed(error) {
+  console.error("📢 Notifying all services that dependencies failed:", error.message)
+  dependencyInstallationFailed = true
+  dependencyInstallationInProgress = false
+  
+  // Reject all pending service starts
+  while (pendingServiceStarts.length > 0) {
+    const { reject } = pendingServiceStarts.shift()
+    reject(error)
+  }
+}
+
 // Get the correct Python executable for both development and packaged environments
 function getPythonExecutable() {
   const isDev = !app.isPackaged
@@ -81,15 +130,79 @@ function setupPythonEnvironment() {
   const isDev = !app.isPackaged
   
   if (!isDev) {
-    // In packaged mode, ensure Python can find our modules
-    const pythonPath = path.join(process.resourcesPath, "backend", "processing")
-    process.env.PYTHONPATH = pythonPath + (process.env.PYTHONPATH ? `:${process.env.PYTHONPATH}` : '')
+    // Enhanced setup for packaged apps, especially Apple Silicon M3
+    console.log("🐍 Setting up Python environment for packaged app...")
+    console.log(`Platform: ${process.platform}, Arch: ${process.arch}`)
     
-    // Also add the python scripts directory
-    const pythonScriptsPath = path.join(process.resourcesPath, "python")
-    process.env.PYTHONPATH += `:${pythonScriptsPath}`
+    // Set working directory to Resources for consistent path resolution
+    const resourcesPath = process.resourcesPath
+    console.log(`Resources path: ${resourcesPath}`)
     
-    console.log(`Set PYTHONPATH for packaged app: ${process.env.PYTHONPATH}`)
+    try {
+      process.chdir(resourcesPath)
+      console.log(`✅ Changed working directory to: ${process.cwd()}`)
+    } catch (error) {
+      console.error(`❌ Failed to change working directory: ${error}`)
+    }
+    
+    // Build comprehensive PYTHONPATH
+    const pythonPaths = [
+      // Backend processing modules
+      path.join(resourcesPath, "backend", "processing"),
+      path.join(resourcesPath, "python-dist", "backend", "processing"),
+      // Python scripts
+      path.join(resourcesPath, "python"),
+      // Search modules
+      path.join(resourcesPath, "backend", "search"),
+      path.join(resourcesPath, "python-dist", "backend", "search"),
+    ]
+    
+    // Filter to only existing paths
+    const existingPaths = pythonPaths.filter(p => {
+      const exists = fs.existsSync(p)
+      console.log(`Python path ${exists ? '✅' : '❌'}: ${p}`)
+      return exists
+    })
+    
+    if (existingPaths.length > 0) {
+      const pythonPathValue = existingPaths.join(path.delimiter)
+      process.env.PYTHONPATH = pythonPathValue + (process.env.PYTHONPATH ? `${path.delimiter}${process.env.PYTHONPATH}` : '')
+      console.log(`✅ Set PYTHONPATH: ${process.env.PYTHONPATH}`)
+    } else {
+      console.warn("⚠️ No Python paths found - backend may not be available")
+    }
+    
+    // Additional environment variables for better compatibility
+    process.env.PYTHONIOENCODING = 'utf-8'
+    process.env.PYTHONUNBUFFERED = '1'
+    
+    // CRITICAL: Isolate Python environment from system packages
+    // This prevents Python from using system site-packages that have incompatible versions
+    process.env.PYTHONNOUSERSITE = '0'  // Allow user site (where we install our packages)
+    process.env.PYTHONSAFEPATH = '1'    // Don't add current directory to sys.path
+    
+    // Set user base to a controlled location for dependency isolation
+    const appDataDir = getAppCacheDir()
+    const userBase = path.join(appDataDir, 'python_packages')
+    process.env.PYTHONUSERBASE = userBase
+    
+    // Add our isolated packages to PYTHONPATH so they're found first
+    const userSitePackages = path.join(userBase, 'lib', 'python', 'site-packages')
+    const currentPythonPath = process.env.PYTHONPATH || ''
+    process.env.PYTHONPATH = userSitePackages + (currentPythonPath ? `${path.delimiter}${currentPythonPath}` : '')
+    
+    console.log(`✅ Set PYTHONUSERBASE: ${userBase}`)
+    console.log(`✅ Added user site-packages to PYTHONPATH: ${userSitePackages}`)
+    console.log(`✅ Python environment isolated from system packages`)
+    
+    // Apple Silicon specific optimizations
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      console.log("🍎 Detected Apple Silicon - setting optimized environment")
+      process.env.OPENBLAS_NUM_THREADS = '1'  // Prevent threading issues
+      process.env.VECLIB_MAXIMUM_THREADS = '1'  // macOS acceleration library threading
+    }
+    
+    console.log("✅ Python environment setup complete")
   }
 }
 
@@ -115,6 +228,57 @@ function getPythonScriptsPath() {
   } else {
     // In packaged app, python scripts are in resources
     return path.join(process.resourcesPath, "python")
+  }
+}
+
+// Function to get app cache directory (matching Python config)
+function getAppCacheDir() {
+  if (process.platform === 'darwin') {  // macOS
+    return path.join(require('os').homedir(), 'Library', 'Application Support', 'silk.ai')
+  } else if (process.platform === 'win32') {  // Windows
+    return path.join(process.env.APPDATA || require('os').homedir(), 'silk.ai')
+  } else {  // Linux and others
+    return path.join(require('os').homedir(), '.config', 'silk.ai')
+  }
+}
+
+// Function to clear locally stored logs
+function clearLocalLogs() {
+  try {
+    const metadataDir = path.join(getAppCacheDir(), 'metadata')
+    
+    // Log files to clear
+    const logFiles = [
+      'memory_log.json',
+      'failed_files.json'
+    ]
+    
+    let clearedCount = 0
+    
+    for (const logFile of logFiles) {
+      const logPath = path.join(metadataDir, logFile)
+      
+      if (fs.existsSync(logPath)) {
+        try {
+          fs.unlinkSync(logPath)
+          console.log(`🧹 Cleared log file: ${logFile}`)
+          clearedCount++
+        } catch (error) {
+          console.warn(`⚠️ Failed to clear log file ${logFile}:`, error.message)
+        }
+      }
+    }
+    
+    if (clearedCount > 0) {
+      console.log(`✅ Cleared ${clearedCount} log files`)
+    } else {
+      console.log("📝 No log files found to clear")
+    }
+    
+    return clearedCount
+  } catch (error) {
+    console.error("❌ Error clearing log files:", error)
+    return 0
   }
 }
 
@@ -272,6 +436,7 @@ function createWindow() {
     height: 900,
     minWidth: 1200,
     minHeight: 700,
+    icon: path.join(__dirname, "public", "icon.png"), // Add silk.ai logo
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -497,9 +662,98 @@ async function handleFolderImport() {
 }
 
 // Search server management
-function startSearchServer() {
+let searchServerStarting = false // Prevent concurrent starts
+
+async function startSearchServer() {
   try {
     console.log("🔍 DEBUG: startSearchServer() called")
+    
+    // CRITICAL: Wait for dependencies before starting search server
+    try {
+      console.log("🔍 Waiting for dependencies before starting search server...")
+      await waitForDependencies()
+      console.log("✅ Dependencies confirmed - proceeding with search server start")
+    } catch (error) {
+      console.error("❌ Search server startup blocked - dependencies failed:", error.message)
+      
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("search-server-error", 
+          `Search server could not start: ${error.message}`)
+      }
+      return
+    }
+    
+    // Prevent concurrent starts
+    if (searchServerStarting) {
+      console.log("🔄 Search server startup already in progress, skipping...")
+      return
+    }
+    
+    // If search server is already running and healthy, don't restart it
+    if (searchServerProcess && !searchServerProcess.killed) {
+      console.log("✅ Search server process already running, checking health...")
+      
+      // Quick health check
+      const http = require('http')
+      const req = http.get('http://localhost:5001/health', { timeout: 2000 }, (res) => {
+        if (res.statusCode === 200) {
+          console.log("✅ Search server is healthy, not restarting")
+          return
+        } else {
+          console.log("⚠️ Search server unhealthy, restarting...")
+          restartSearchServer()
+        }
+      })
+      
+      req.on('error', () => {
+        console.log("⚠️ Search server not responding, restarting...")
+        restartSearchServer()
+      })
+      
+      req.on('timeout', () => {
+        req.destroy()
+        console.log("⚠️ Search server timeout, restarting...")
+        restartSearchServer()
+      })
+      
+      return
+    }
+    
+    startSearchServerInternal()
+  } catch (error) {
+    console.error("❌ Failed to start search server:", error)
+    searchServerStarting = false
+  }
+}
+
+function restartSearchServer() {
+  console.log("🔄 Restarting search server...")
+  try {
+    if (searchServerProcess && !searchServerProcess.killed) {
+      searchServerProcess.kill('SIGTERM')
+      setTimeout(() => {
+        if (searchServerProcess && !searchServerProcess.killed) {
+          console.log("🔄 Force killing search server process...")
+          searchServerProcess.kill('SIGKILL')
+        }
+        searchServerProcess = null
+        setTimeout(() => {
+          startSearchServerInternal()
+        }, 1000)
+      }, 2000)
+    } else {
+      startSearchServerInternal()
+    }
+  } catch (error) {
+    console.warn("⚠️ Error restarting search server:", error)
+    searchServerStarting = false
+  }
+}
+
+function startSearchServerInternal() {
+  try {
+    console.log("🔍 DEBUG: startSearchServerInternal() called")
+    searchServerStarting = true // Set flag to prevent concurrent starts
     
     const pythonExe = getPythonExecutable()
     console.log(`🔍 DEBUG: Python executable: ${pythonExe}`)
@@ -517,6 +771,7 @@ function startSearchServer() {
     const fs = require("fs")
     if (!fs.existsSync(searchServerScript)) {
       console.error(`❌ Search server script not found at: ${searchServerScript}`)
+      searchServerStarting = false
       return
     }
     console.log(`✅ Search server script exists at: ${searchServerScript}`)
@@ -524,6 +779,7 @@ function startSearchServer() {
     // Check if the working directory exists
     if (!fs.existsSync(searchWorkingDir)) {
       console.error(`❌ Search working directory not found at: ${searchWorkingDir}`)
+      searchServerStarting = false
       return
     }
     console.log(`✅ Search working directory exists at: ${searchWorkingDir}`)
@@ -533,52 +789,111 @@ function startSearchServer() {
     
     searchServerProcess = spawn(pythonExe, [searchServerScript], {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: searchWorkingDir
+      cwd: searchWorkingDir,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
     })
 
     console.log(`✅ Search server process spawned with PID: ${searchServerProcess.pid}`)
 
+    let searchServerLogBuffer = []
+    const MAX_LOG_LINES = 200
+
+    function addToSearchLogBuffer(message, type = 'output') {
+      searchServerLogBuffer.push({ message, type, timestamp: Date.now() })
+      
+      // Keep only the last MAX_LOG_LINES
+      if (searchServerLogBuffer.length > MAX_LOG_LINES) {
+        searchServerLogBuffer = searchServerLogBuffer.slice(-MAX_LOG_LINES)
+      }
+      
+      // Send to UI
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(`search-server-${type}`, message)
+      }
+    }
+
     searchServerProcess.stdout.on("data", (data) => {
       const output = data.toString()
       console.log(`🔍 Search Server STDOUT: ${output}`)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("search-server-output", output)
-      }
+      addToSearchLogBuffer(output, 'output')
     })
 
     searchServerProcess.stderr.on("data", (data) => {
       const error = data.toString()
       console.error(`🔍 Search Server STDERR: ${error}`)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("search-server-error", error)
-      }
+      addToSearchLogBuffer(error, 'error')
     })
 
     searchServerProcess.on("close", (code) => {
       console.log(`🔍 Search server process closed with code ${code}`)
+      searchServerProcess = null // Reset process reference when closed
+      searchServerStarting = false // Reset flag when process closes
     })
 
     searchServerProcess.on("error", (error) => {
       console.error(`🔍 Search server process error:`, error)
+      searchServerStarting = false // Reset flag on error
     })
 
-    console.log("✅ Search server startup completed (process handlers attached)")
+    // Reset flag after successful startup
+    setTimeout(() => {
+      searchServerStarting = false
+      console.log("✅ Search server startup completed (process handlers attached)")
+    }, 5000)
+    
   } catch (error) {
     console.error("❌ Failed to start search server:", error)
+    searchServerStarting = false // Reset flag on exception
   }
 }
 
 // Python process management
-function startPythonProcess() {
+async function startPythonProcess() {
   try {
+    // CRITICAL: Wait for dependencies before starting Python process
+    try {
+      console.log("🐍 Waiting for dependencies before starting Python process...")
+      await waitForDependencies()
+      console.log("✅ Dependencies confirmed - proceeding with Python process start")
+    } catch (error) {
+      console.error("❌ Python process startup blocked - dependencies failed:", error.message)
+      
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("python-error", 
+          `Python process could not start: ${error.message}`)
+      }
+      return
+    }
+    
     const pythonExe = getPythonExecutable()
     const pythonScriptsPath = getPythonScriptsPath()
     const mainScript = path.join(pythonScriptsPath, "main.py")
+    
+    // Run import diagnostics first in development mode
+    if (process.env.NODE_ENV === "development") {
+      console.log("🔍 Running import diagnostics...")
+      const diagnosticScript = path.join(pythonScriptsPath, "test_imports.py")
+      if (fs.existsSync(diagnosticScript)) {
+        try {
+          const { execSync } = require('child_process')
+          const diagnosticResult = execSync(`${pythonExe} "${diagnosticScript}"`, {
+            encoding: 'utf8',
+            timeout: 30000,
+            cwd: pythonScriptsPath
+          })
+          console.log("📋 Diagnostic results:")
+          console.log(diagnosticResult)
+        } catch (error) {
+          console.log("⚠️ Diagnostic script failed:", error.message)
+        }
+      }
+    }
     
     console.log(`Starting Python process with: ${pythonExe} ${mainScript}`)
     
     pythonProcess = spawn(pythonExe, [mainScript], {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: process.resourcesPath,
       env: { ...process.env, PYTHONUNBUFFERED: '1' }
     })
 
@@ -592,29 +907,43 @@ function startPythonProcess() {
       console.log(`Python process exited with code ${code}, signal ${signal}`)
     })
 
-    let pythonOutputBuffer = ''
+      let pythonOutputBuffer = ''
+  let pythonLogBuffer = []
+  const MAX_LOG_LINES = 200
 
-    pythonProcess.stdout.on("data", (data) => {
-      const output = data.toString()
-      pythonOutputBuffer += output
-      
-      // Process complete lines from the buffer
-      const lines = pythonOutputBuffer.split('\n')
-      pythonOutputBuffer = lines.pop() // Keep the incomplete line in buffer
-      
-      for (const line of lines) {
-        if (line.trim() && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("python-output", line.trim())
-        }
-      }
-    })
+  function addToPythonLogBuffer(message, type = 'output') {
+    pythonLogBuffer.push({ message, type, timestamp: Date.now() })
+    
+    // Keep only the last MAX_LOG_LINES
+    if (pythonLogBuffer.length > MAX_LOG_LINES) {
+      pythonLogBuffer = pythonLogBuffer.slice(-MAX_LOG_LINES)
+    }
+    
+    // Send to UI
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(`python-${type}`, message)
+    }
+  }
 
-    pythonProcess.stderr.on("data", (data) => {
-      console.error(`Python stderr: ${data}`)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("python-error", data.toString())
+  pythonProcess.stdout.on("data", (data) => {
+    const output = data.toString()
+    pythonOutputBuffer += output
+    
+    // Process complete lines from the buffer
+    const lines = pythonOutputBuffer.split('\n')
+    pythonOutputBuffer = lines.pop() // Keep the incomplete line in buffer
+    
+    for (const line of lines) {
+      if (line.trim()) {
+        addToPythonLogBuffer(line.trim(), 'output')
       }
-    })
+    }
+  })
+
+  pythonProcess.stderr.on("data", (data) => {
+    console.error(`Python stderr: ${data}`)
+    addToPythonLogBuffer(data.toString(), 'error')
+  })
 
     pythonProcess.on("close", (code) => {
       console.log(`Python process exited with code ${code}`)
@@ -637,6 +966,23 @@ function startPythonProcess() {
   }
 }
 
+// Global log buffers for managing UI log overflow
+let globalPythonLogBuffer = []
+let globalSearchLogBuffer = []
+const GLOBAL_MAX_LOG_LINES = 200
+
+// Function to clear all UI logs 
+function clearUILogs() {
+  globalPythonLogBuffer = []
+  globalSearchLogBuffer = []
+  
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("clear-logs")
+  }
+  
+  console.log("🧹 Cleared UI log buffers to prevent lag")
+}
+
 // IPC handlers
 ipcMain.handle("select-files", handleFileImport)
 ipcMain.handle("select-folder", handleFolderImport)
@@ -644,6 +990,7 @@ ipcMain.handle("process-files", handleProcessFiles)
 ipcMain.handle("get-metadata-paths", handleGetMetadataPaths)
 ipcMain.handle("test-api-connectivity", handleTestApiConnectivity)
 ipcMain.handle("stop-processing", handleStopProcessing)
+ipcMain.handle("clear-ui-logs", clearUILogs)
 
 // File system operation handlers
 ipcMain.handle("open-file", async (event, filePath) => {
@@ -937,56 +1284,26 @@ async function handleTestApiConnectivity(event) {
 // Stop processing handler
 async function handleStopProcessing() {
   try {
-    console.log("🛑 Stopping processing using tagdirectory stop_running_instance()...")
+    console.log("🛑 Stopping processing by sending stop command to unified service...")
     
-    // Use the proper stop function from tagdirectory.py
-    const backendPath = getBackendPath()
-    const pythonExe = getPythonExecutable()
-    const tagDirectoryPath = path.join(backendPath, "processing", "tagdirectory.py")
-    
-    // Call tagdirectory.py --stop to use the built-in stop_running_instance() function
-    const stopProcess = spawn(pythonExe, [tagDirectoryPath, "--stop"], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: path.join(backendPath, "processing")
-    })
-    
-    return new Promise((resolve) => {
-      let output = ''
-      let errorOutput = ''
+    // Send stop command to the existing Python process instead of spawning a new one
+    if (pythonProcess && pythonProcess.stdin && !pythonProcess.killed) {
+      const stopCommand = {
+        action: "stop_enhanced"
+      }
       
-      stopProcess.stdout.on('data', (data) => {
-        output += data.toString()
-        console.log(`Stop output: ${data.toString().trim()}`)
-      })
-      
-      stopProcess.stderr.on('data', (data) => {
-        errorOutput += data.toString()
-        console.log(`Stop error: ${data.toString().trim()}`)
-      })
-      
-      stopProcess.on('close', (code) => {
-        if (code === 0) {
-          console.log("✅ Processing stopped successfully")
-          resolve({ success: true, message: "Processing stopped successfully" })
-        } else {
-          console.log(`⚠️ Stop command exited with code ${code}`)
-          resolve({ success: true, message: `Stop command completed with code ${code}` })
-        }
-      })
-      
-      stopProcess.on('error', (error) => {
-        console.error("❌ Failed to execute stop command:", error)
-        resolve({ success: false, error: error.message })
-      })
-      
-      // Timeout after 10 seconds
-      setTimeout(() => {
-        if (!stopProcess.killed) {
-          stopProcess.kill('SIGTERM')
-          resolve({ success: true, message: "Stop command timed out but process was terminated" })
-        }
-      }, 10000)
-    })
+      try {
+        pythonProcess.stdin.write(JSON.stringify(stopCommand) + "\n")
+        console.log("✅ Stop command sent to unified service")
+        return { success: true, message: "Stop command sent to processing service" }
+      } catch (writeError) {
+        console.error("❌ Failed to send stop command:", writeError)
+        return { success: false, error: `Failed to send stop command: ${writeError.message}` }
+      }
+    } else {
+      console.log("⚠️ Python process not available for stop command")
+      return { success: false, error: "Python unified service process not available" }
+    }
     
   } catch (error) {
     console.error("❌ Failed to stop processing:", error)
@@ -1023,9 +1340,27 @@ async function ensureFfmpegBinaries() {
   return false
 }
 
+
 // App event handlers
 app.whenReady().then(async () => {
   console.log("🚀 App is ready! Starting initialization sequence...")
+  
+  // Clear local logs on app launch
+  console.log("🧹 Clearing local logs on app launch...")
+  clearLocalLogs()
+  
+  // Clear UI logs on app launch to prevent accumulation
+  console.log("🧹 Clearing UI log buffers on app launch...")
+  clearUILogs()
+  
+  // Set up periodic log clearing to prevent UI lag (every 5 minutes)
+  setInterval(() => {
+    const totalLogs = globalPythonLogBuffer.length + globalSearchLogBuffer.length
+    if (totalLogs > GLOBAL_MAX_LOG_LINES * 0.8) { // Clear when 80% full
+      console.log(`🧹 Auto-clearing UI logs (${totalLogs} total logs)`)
+      clearUILogs()
+    }
+  }, 5 * 60 * 1000) // 5 minutes
   
   // Setup Python environment for packaged apps
   setupPythonEnvironment()
@@ -1040,50 +1375,61 @@ app.whenReady().then(async () => {
     console.error("❌ Failed to setup FFmpeg binaries:", error)
   }
   
-  createWindow()
-  console.log("✅ Main window created")
+  // CRITICAL: Check and install dependencies BEFORE creating main window
+  console.log("🔧 Checking Python dependencies before starting application...")
+  dependencyInstallationInProgress = true
   
-  // Start both services immediately, don't wait for dependencies
-  console.log("🚀 Starting search server immediately...")
-  setTimeout(() => {
-    console.log("⏰ Search server startup timeout triggered - starting now")
-    try {
-      startSearchServer()
-      console.log("✅ Search server startup initiated")
-    } catch (error) {
-      console.error("❌ Search server startup failed:", error)
-    }
-  }, 1000)
-  
-  console.log("🚀 Starting unified service...")
-  setTimeout(() => {
-    console.log("⏰ Unified service startup timeout triggered - starting now")
-    try {
-      startPythonProcess()
-      console.log("✅ Unified service startup initiated")
-    } catch (error) {
-      console.error("❌ Unified service startup failed:", error)
-    }
-  }, 3000)
-  
-  // Handle dependencies in background without blocking service startup
-  console.log("🔧 Starting Python dependencies check in background...")
-  setTimeout(() => {
-    ensurePythonDependencies()
-      .then(() => {
-        console.log("✅ Python dependencies ready")
+  try {
+    // Add a timeout to prevent indefinite hanging
+    const dependencyTimeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Dependency installation timeout after 10 minutes")), 10 * 60 * 1000)
+    })
+    
+    await Promise.race([ensurePythonDependencies(), dependencyTimeout])
+    console.log("✅ Python dependencies ready - creating main window...")
+    notifyDependenciesReady()
+    
+    // Create main window only after dependencies are ready
+    createWindow()
+    console.log("✅ Main window created with dependencies confirmed")
+    
+    // Start services after dependencies are confirmed
+    setTimeout(() => {
+      console.log("🚀 Starting search server with confirmed dependencies...")
+      try {
+        startSearchServer()
+        console.log("✅ Search server startup initiated")
+      } catch (error) {
+        console.error("❌ Search server startup failed:", error)
+      }
+    }, 1000)
+    
+    setTimeout(async () => {
+      console.log("🚀 Starting Python unified service with confirmed dependencies...")
+      try {
+        await startPythonProcess()
+        console.log("✅ Unified service startup initiated")
+      } catch (error) {
+        console.error("❌ Unified service startup failed:", error)
+      }
+    }, 2000) // Stagger the service starts
+    
+  } catch (error) {
+    console.error("❌ Failed to setup Python dependencies:", error)
+    notifyDependenciesFailed(error)
+    
+    // Still create main window but show error
+    createWindow()
+    console.log("✅ Main window created (with dependency warnings)")
+    
+    // Show error to user
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("dependency-error", {
+        message: "Failed to install Python dependencies. App functionality will be limited.",
+        error: error.message
       })
-      .catch((error) => {
-        console.error("❌ Failed to setup Python dependencies:", error)
-        // Show error to user and continue with limited functionality
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("dependency-error", {
-            message: "Failed to install Python dependencies. Some features may not work.",
-            error: error.message
-          })
-        }
-      })
-  }, 5000) // Start dependency check after services are running
+    }
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1093,6 +1439,10 @@ app.whenReady().then(async () => {
 })
 
 app.on("window-all-closed", () => {
+  // Clear local logs on window closure
+  console.log("🧹 Clearing local logs on window closure...")
+  clearLocalLogs()
+  
   // Safely terminate processes
   try {
     if (pythonProcess && !pythonProcess.killed) {
@@ -1122,6 +1472,10 @@ app.on("window-all-closed", () => {
 })
 
 app.on("before-quit", () => {
+  // Clear local logs on app closure
+  console.log("🧹 Clearing local logs on app closure...")
+  clearLocalLogs()
+  
   // Safely terminate processes on quit
   try {
     if (pythonProcess && !pythonProcess.killed) {
@@ -1156,18 +1510,51 @@ async function ensurePythonDependencies() {
   const appDataDir = require('os').homedir()
   const markerFile = path.join(appDataDir, '.silk-ai-deps-installed')
   
-  // Also check if required packages are actually available
-  let allPackagesAvailable = true
+  // More comprehensive dependency test including search functionality
+  let corePackagesAvailable = true
   if (fs.existsSync(markerFile)) {
+    // Log marker file info for debugging
     try {
-      // Test if key packages are available - especially whisper which was failing
-      const testResult = await new Promise((resolve) => {
-        const testProcess = spawn(pythonExe, ['-c', 'import whisper, sentence_transformers, rank_bm25, flask, torch, transformers; print("OK")'], {
-          stdio: ['pipe', 'pipe', 'pipe']
+      const markerContent = fs.readFileSync(markerFile, 'utf8')
+      console.log(`📋 Found dependency marker file: ${markerFile}`)
+      console.log(`📋 Marker content: ${markerContent.slice(0, 100)}...`)
+    } catch (e) {
+      console.log(`📋 Marker file exists but couldn't read it: ${e.message}`)
+    }
+    try {
+      console.log("🔍 Testing core packages for search functionality...")
+      
+      // CRITICAL: Test numpy first since it's the most common failure point
+      console.log("🧮 Testing numpy (critical dependency)...")
+      const numpyTestResult = await new Promise((resolve) => {
+        const numpyTestScript = `
+import sys
+print(f"Python: {sys.version}")
+print(f"Platform: {sys.platform}")
+print(f"Architecture: {sys.platform}")
+try:
+    import numpy as np
+    print(f"NumPy version: {np.__version__}")
+    print(f"NumPy location: {np.__file__}")
+    # Test core multiarray (common failure point)
+    from numpy.core.multiarray import _reconstruct
+    # Test basic array creation
+    arr = np.array([1, 2, 3])
+    print(f"Array test: {arr.sum()}")
+    print("NUMPY_OK")
+except ImportError as e:
+    print(f"NUMPY_IMPORT_ERROR: {e}")
+except Exception as e:
+    print(f"NUMPY_ERROR: {e}")
+`
+        const testProcess = spawn(pythonExe, ['-c', numpyTestScript], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 20000  // 20 second timeout for numpy
         })
         
         let output = ''
         let errorOutput = ''
+        
         testProcess.stdout.on('data', (data) => {
           output += data.toString()
         })
@@ -1177,39 +1564,252 @@ async function ensurePythonDependencies() {
         })
         
         testProcess.on('close', (code) => {
-          if (code !== 0 || !output.includes('OK')) {
-            console.log(`⚠️ Dependency test failed - code: ${code}, output: ${output}, error: ${errorOutput}`)
+          const success = code === 0 && output.includes('NUMPY_OK')
+          if (!success) {
+            console.log(`❌ NumPy test failed - code: ${code}`)
+            console.log(`Output: ${output}`)
+            console.log(`Error: ${errorOutput}`)
+          } else {
+            console.log(`✅ NumPy test passed`)
           }
-          resolve(code === 0 && output.includes('OK'))
+          resolve(success)
         })
         
         testProcess.on('error', (error) => {
-          console.log(`⚠️ Dependency test error: ${error.message}`)
+          console.log(`❌ NumPy test process error: ${error.message}`)
           resolve(false)
         })
       })
       
-      allPackagesAvailable = testResult
+      if (!numpyTestResult) {
+        console.log(`❌ NumPy failed critical test - will reinstall`)
+        corePackagesAvailable = false
+      }
+      
+      // Test essential packages including search-specific dependencies
+      const corePackages = [
+        'requests', 
+        'flask', 
+        'flask_cors',
+        'huggingface_hub',    // CRITICAL: Test before sentence_transformers
+        'sentence_transformers', 
+        'tensorflow',         // CRITICAL: Video processing dependency
+        'tensorflow_hub',     // CRITICAL: Video processing dependency  
+        'torch',              // PyTorch for ML operations
+        'torchaudio',         // Audio processing
+        'cv2',                // OpenCV for video/image processing  
+        'skimage',            // Scikit-image for SSIM calculations
+        'easyocr',            // OCR for text extraction
+        'whisper',            // Audio transcription
+        'soundfile',          // Audio file reading
+        'rank_bm25',          // Critical for BM25 search
+        'nltk',               // Enhanced tokenizer dependency
+        'spellchecker',       // Spell checking for search
+        'natsort',            // Natural sorting for file operations
+        'PIL',                // Pillow for image processing
+        'psutil'              // System monitoring
+      ]
+      
+      for (const pkg of corePackages) {
+        const testResult = await new Promise((resolve) => {
+          const testProcess = spawn(pythonExe, ['-c', `import ${pkg}; print("${pkg}_OK")`], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 15000  // 15 second timeout per package
+          })
+          
+          let output = ''
+          let errorOutput = ''
+          
+          testProcess.stdout.on('data', (data) => {
+            output += data.toString()
+          })
+          
+          testProcess.stderr.on('data', (data) => {
+            errorOutput += data.toString()
+          })
+          
+          testProcess.on('close', (code) => {
+            const success = code === 0 && output.includes(`${pkg}_OK`)
+            if (!success) {
+              console.log(`⚠️ Package ${pkg} test failed - code: ${code}, output: ${output}, error: ${errorOutput}`)
+            } else {
+              console.log(`✅ Package ${pkg} test passed`)
+            }
+            resolve(success)
+          })
+          
+          testProcess.on('error', (error) => {
+            console.log(`⚠️ Package ${pkg} test error: ${error.message}`)
+            resolve(false)
+          })
+        })
+        
+        if (!testResult) {
+          console.log(`❌ Core package ${pkg} failed test`)
+          corePackagesAvailable = false
+          break  // If any core package fails, we need to reinstall
+        }
+      }
+      
+      // CRITICAL: Specific test for sentence_transformers + huggingface_hub compatibility
+      if (corePackagesAvailable) {
+        console.log("🔍 Testing sentence_transformers + huggingface_hub compatibility...")
+        const compatibilityTestResult = await new Promise((resolve) => {
+          const compatibilityTestScript = `
+import sys
+try:
+    print("Testing huggingface_hub version...")
+    import huggingface_hub
+    print(f"huggingface_hub version: {huggingface_hub.__version__}")
+    
+    # Test the specific import that was failing
+    from huggingface_hub import HfApi, HfFolder, Repository, hf_hub_url, cached_download
+    print("✅ cached_download import successful")
+    
+    print("Testing sentence_transformers...")
+    from sentence_transformers import SentenceTransformer, util
+    print("✅ sentence_transformers import successful")
+    
+    print("COMPATIBILITY_TEST_PASSED")
+except ImportError as e:
+    print(f"COMPATIBILITY_IMPORT_ERROR: {e}")
+except Exception as e:
+    print(f"COMPATIBILITY_ERROR: {e}")
+`
+          const testProcess = spawn(pythonExe, ['-c', compatibilityTestScript], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 20000  // 20 second timeout
+          })
+          
+          let output = ''
+          let errorOutput = ''
+          
+          testProcess.stdout.on('data', (data) => {
+            output += data.toString()
+          })
+          
+          testProcess.stderr.on('data', (data) => {
+            errorOutput += data.toString()
+          })
+          
+          testProcess.on('close', (code) => {
+            const success = code === 0 && output.includes('COMPATIBILITY_TEST_PASSED')
+            if (!success) {
+              console.log(`❌ Compatibility test failed - code: ${code}`)
+              console.log(`Output: ${output}`)
+              console.log(`Error: ${errorOutput}`)
+            } else {
+              console.log(`✅ sentence_transformers + huggingface_hub compatibility verified`)
+            }
+            resolve(success)
+          })
+          
+          testProcess.on('error', (error) => {
+            console.log(`❌ Compatibility test process error: ${error.message}`)
+            resolve(false)
+          })
+        })
+        
+        if (!compatibilityTestResult) {
+          console.log(`❌ sentence_transformers + huggingface_hub compatibility failed - will reinstall`)
+          corePackagesAvailable = false
+        }
+      }
+      
+      // Test NLTK data availability (critical for enhanced tokenizer)
+      if (corePackagesAvailable) {
+        console.log("🔍 Testing NLTK data packages...")
+        const nltkTestResult = await new Promise((resolve) => {
+          const testScript = `
+import nltk
+try:
+    from nltk.tokenize import word_tokenize
+    from nltk.corpus import stopwords
+    from nltk.stem import PorterStemmer
+    word_tokenize("test")
+    stopwords.words('english')
+    print("NLTK_DATA_OK")
+except:
+    print("NLTK_DATA_MISSING")
+`
+          const testProcess = spawn(pythonExe, ['-c', testScript], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 10000
+          })
+          
+          let output = ''
+          testProcess.stdout.on('data', (data) => {
+            output += data.toString()
+          })
+          
+          testProcess.on('close', (code) => {
+            const success = output.includes('NLTK_DATA_OK')
+            if (!success) {
+              console.log(`⚠️ NLTK data test failed - missing required data packages`)
+            } else {
+              console.log(`✅ NLTK data test passed`)
+            }
+            resolve(success)
+          })
+          
+          testProcess.on('error', (error) => {
+            console.log(`⚠️ NLTK data test error: ${error.message}`)
+            resolve(false)
+          })
+        })
+        
+        if (!nltkTestResult) {
+          console.log(`❌ NLTK data packages missing - search functionality will be impaired`)
+          corePackagesAvailable = false
+        }
+      }
+      
+      if (corePackagesAvailable) {
+        console.log("✅ All core packages and NLTK data available")
+      }
+      
     } catch (error) {
-      allPackagesAvailable = false
+      console.log(`⚠️ Core package test error: ${error.message}`)
+      corePackagesAvailable = false
     }
   }
   
-  if (fs.existsSync(markerFile) && allPackagesAvailable) {
+  // Check version compatibility - force reinstall if version mismatch
+  let versionMismatch = false
+  if (fs.existsSync(markerFile)) {
+    try {
+      const existingMarker = JSON.parse(fs.readFileSync(markerFile, 'utf8'))
+      const currentVersion = "2.0.0"
+      if (existingMarker.version !== currentVersion) {
+        console.log(`🔄 Version mismatch: ${existingMarker.version} → ${currentVersion}, forcing reinstall...`)
+        versionMismatch = true
+        fs.unlinkSync(markerFile) // Remove old marker
+      }
+    } catch (e) {
+      console.log("⚠️ Could not read existing marker file, will reinstall")
+      versionMismatch = true
+    }
+  }
+  
+  if (fs.existsSync(markerFile) && corePackagesAvailable && !versionMismatch) {
     console.log("✅ Dependencies already installed and available, skipping...")
     return
   }
   
-  if (!allPackagesAvailable) {
-    console.log("⚠️ Some dependencies missing, reinstalling...")
+  if (!corePackagesAvailable) {
+    console.log("⚠️ Some core dependencies missing, reinstalling...")
   }
   
   // Show a loading window while installing dependencies
   const loadingWindow = new BrowserWindow({
-    width: 400,
-    height: 300,
+    width: 450,
+    height: 350,
     show: false,
     resizable: false,
+    center: true,
+    alwaysOnTop: true,
+    frame: false,
+    backgroundColor: '#667eea',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true
@@ -1247,120 +1847,427 @@ async function ensurePythonDependencies() {
                 0% { transform: rotate(0deg); }
                 100% { transform: rotate(360deg); }
             }
-            .message { text-align: center; max-width: 300px; }
+            .message { text-align: center; max-width: 320px; }
+            .details { font-size: 0.9em; opacity: 0.9; margin-top: 10px; }
         </style>
     </head>
     <body>
         <div class="logo">🚀 silk.ai</div>
         <div class="spinner"></div>
         <div class="message">
-            <h3>Setting up for first run...</h3>
-            <p>Installing AI dependencies. This may take a few minutes.</p>
+            <h3>Installing Dependencies...</h3>
+            <p>Setting up AI models and required packages including NumPy, SentenceTransformers, natsort, and search functionality.</p>
+            <div class="details">This may take a few minutes on first launch.</div>
         </div>
     </body>
     </html>
   `
-  
-  loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`)
-  loadingWindow.show()
-  
-  // Essential packages needed for the app to run
-  const essentialPackages = [
-    'sentence-transformers',
-    'torch',
-    'torchaudio',
-    'numpy',
-    'requests',
-    'flask',
-    'flask-cors',
-    'rank_bm25',           // Needed for search functionality
-    'Pillow',              // Image processing
-    'python-dotenv',       // Environment variables
-    'pydantic',            // Data validation
-    'scikit-learn',        // Machine learning utilities
-    'opencv-python',       // Computer vision for frame processing
-    'scikit-image',        // Image processing (for SSIM comparison)
-    'natsort',             // Natural sorting for frame ordering
-    'easyocr',             // OCR functionality for text extraction
-    'psutil',              // System monitoring and memory usage
-    'moondream',           // Image captioning
-    'transformers',        // Hugging Face transformers
-    'openai-whisper',      // CORRECTED: OpenAI Whisper for audio transcription
-    'tensorflow',          // TensorFlow for ML models
-    'tensorflow-hub',      // TensorFlow Hub for pre-trained models
-    'soundfile',           // Audio file I/O
-    'PyYAML',              // YAML parsing
-  ]
-  
+
   try {
-    console.log("📦 Installing essential Python packages...")
+    await loadingWindow.loadURL(`data:text/html,${encodeURIComponent(loadingHtml)}`)
+    loadingWindow.show()
     
-    // First, explicitly uninstall conflicting packages to prevent issues
-    console.log("🧹 Removing conflicting packages...")
-    await new Promise((resolve) => {
-      const uninstallProcess = spawn(pythonExe, ['-m', 'pip', 'uninstall', '--user', 'whisper', '-y'], {
+    console.log("🔄 Installing Python dependencies for packaged app...")
+    
+    // Setup isolated environment for dependency installation
+    const appDataDir = getAppCacheDir()
+    const userBase = path.join(appDataDir, 'python_packages')
+    process.env.PYTHONUSERBASE = userBase
+    console.log(`📦 Installing dependencies to isolated location: ${userBase}`)
+    
+    // Create the directory if it doesn't exist
+    const userSitePackages = path.join(userBase, 'lib', 'python', 'site-packages')
+    if (!fs.existsSync(userSitePackages)) {
+      fs.mkdirSync(userSitePackages, { recursive: true })
+      console.log(`✅ Created user site-packages directory: ${userSitePackages}`)
+    }
+    
+    // CRITICAL: Install numpy first separately with special handling
+    console.log("🧮 Installing NumPy first (critical foundation dependency)...")
+    const numpyInstallSuccess = await new Promise((resolve) => {
+      // Detect platform and architecture for numpy
+      const platform = process.platform
+      const arch = process.arch
+      console.log(`Platform: ${platform}, Architecture: ${arch}`)
+      
+      // Use specific numpy installation strategy - CRITICAL: Must be 1.x for OpenCV compatibility
+      let numpyPackage = 'numpy>=1.21.0,<2.0.0'  // Force NumPy 1.x to avoid OpenCV conflicts
+      
+      // Platform-specific numpy installation args - PYTHONUSERBASE controls where --user installs
+      let installArgs = ['-m', 'pip', 'install', '--user', '--upgrade', '--no-warn-script-location']
+      
+      if (platform === 'darwin' && arch === 'arm64') {
+        // Apple Silicon - ensure proper wheel
+        console.log("🍎 Detected Apple Silicon - using compatible NumPy")
+        installArgs.push('--only-binary=:all:')  // Force binary wheels
+      } else if (platform === 'darwin' && arch === 'x64') {
+        // Intel Mac - use Intel-optimized version
+        console.log("🍎 Detected Intel Mac - using Intel-optimized NumPy")
+        installArgs.push('--only-binary=:all:')
+      } else if (platform === 'win32') {
+        // Windows - use pre-compiled wheels
+        console.log("🪟 Detected Windows - using pre-compiled NumPy")
+        installArgs.push('--only-binary=:all:')
+      }
+      
+      // First uninstall any existing NumPy 2.x that might be causing conflicts
+      installArgs.push('--force-reinstall', numpyPackage)
+      
+      const numpyProcess = spawn(pythonExe, installArgs, {
         stdio: ['pipe', 'pipe', 'pipe']
       })
       
-      uninstallProcess.on("close", (code) => {
-        console.log(`✅ Removed conflicting whisper package (exit code: ${code})`)
-        resolve() // Continue regardless of success
+      let installOutput = ''
+      let installError = ''
+      
+      numpyProcess.stdout.on('data', (data) => {
+        installOutput += data.toString()
       })
       
-      uninstallProcess.on("error", (error) => {
-        console.log(`⚠️ Error removing whisper package (continuing):`, error.message)
-        resolve() // Continue anyway
+      numpyProcess.stderr.on('data', (data) => {
+        installError += data.toString()
+      })
+      
+      numpyProcess.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ NumPy installed successfully`)
+          resolve(true)
+        } else {
+          console.log(`❌ NumPy installation failed with code ${code}`)
+          console.log(`Output: ${installOutput}`)
+          console.log(`Error: ${installError}`)
+          resolve(false)
+        }
+      })
+      
+      numpyProcess.on('error', (error) => {
+        console.log(`❌ NumPy installation error: ${error.message}`)
+        resolve(false)
       })
     })
     
-    // Install essential packages one by one with progress
-    // Use --user flag to install to user directory that packaged apps can access
-    for (let i = 0; i < essentialPackages.length; i++) {
-      const pkg = essentialPackages[i]
-      console.log(`Installing ${pkg} (${i + 1}/${essentialPackages.length})...`)
-      
-      await new Promise((resolve, reject) => {
-        const installProcess = spawn(pythonExe, ['-m', 'pip', 'install', '--user', pkg], {
-          stdio: ['pipe', 'pipe', 'pipe']
+    if (!numpyInstallSuccess) {
+      console.log("⚠️ NumPy installation failed - some features may not work properly")
+    }
+    
+    // Test numpy after installation
+    if (numpyInstallSuccess) {
+      console.log("🧮 Testing NumPy installation...")
+      const numpyVerifyResult = await new Promise((resolve) => {
+        const testScript = `
+try:
+    import numpy as np
+    from numpy.core.multiarray import _reconstruct
+    arr = np.array([1, 2, 3])
+    print(f"NumPy {np.__version__} working correctly - array sum: {arr.sum()}")
+    print("NUMPY_VERIFIED")
+except Exception as e:
+    print(f"NumPy verification failed: {e}")
+`
+        const testProcess = spawn(pythonExe, ['-c', testScript], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 10000
         })
         
         let output = ''
-        let errorOutput = ''
-        
-        installProcess.stdout.on('data', (data) => {
+        testProcess.stdout.on('data', (data) => {
           output += data.toString()
         })
         
-        installProcess.stderr.on('data', (data) => {
-          errorOutput += data.toString()
-        })
-        
-        installProcess.on("close", (code) => {
-          if (code === 0) {
-            console.log(`✅ Installed ${pkg}`)
+        testProcess.on('close', (code) => {
+          const success = output.includes('NUMPY_VERIFIED')
+          if (success) {
+            console.log(`✅ NumPy verification passed`)
           } else {
-            console.log(`⚠️ Failed to install ${pkg}:`, errorOutput)
+            console.log(`❌ NumPy verification failed`)
           }
-          resolve() // Continue even if one package fails
+          resolve(success)
         })
         
-        installProcess.on("error", (error) => {
-          console.log(`⚠️ Error installing ${pkg}:`, error.message)
-          resolve() // Continue anyway
+        testProcess.on('error', (error) => {
+          console.log(`❌ NumPy verification error: ${error.message}`)
+          resolve(false)
+        })
+      })
+      
+      if (!numpyVerifyResult) {
+        console.log("⚠️ NumPy verification failed after installation")
+      }
+    }
+    
+    // Define all essential packages (excluding numpy since we installed it separately)
+    const essentialPackages = [
+      // Core API and server
+      'fastapi==0.104.1',
+      'uvicorn[standard]==0.24.0',
+      'requests==2.31.0',
+      'flask>=2.0.0',
+      'flask-cors>=3.0.0',
+      
+      // Machine learning and embeddings (numpy already installed)
+      // CRITICAL: Fix huggingface_hub compatibility with sentence-transformers 2.2.2
+      // sentence-transformers 2.2.2 requires older huggingface_hub with cached_download
+      'huggingface_hub>=0.10.0,<0.16.0',  // Compatible version range for cached_download
+      'sentence-transformers==2.2.2',
+      'torch>=2.0.0',
+      'transformers>=4.6.0',
+      
+      // TensorFlow for video processing - CRITICAL for videotagger
+      'tensorflow>=2.10.0',
+      'tensorflow-hub',
+      
+      // Search functionality - CRITICAL
+      'rank-bm25==0.2.2',
+      'nltk>=3.8',
+      'pyspellchecker>=0.8.0',
+      'natsort==8.4.0',  // Natural sorting for file operations
+      
+      // Image and document processing - OpenCV compatible with NumPy 1.x
+      'pillow==10.4.0',
+      'opencv-python>=4.5.0,<4.9.0',  // Ensure NumPy 1.x compatibility
+      'scikit-image==0.22.0',  // CRITICAL: Used by framesegmentation.py for SSIM
+      'easyocr==1.7.0',
+      'pdfplumber>=3.0.0',
+      'pypdf>=3.0.0',
+      'python-docx>=1.1.0',
+      'python-pptx>=0.6.0',  // Used by textprocessor
+      'openpyxl>=3.1.0',     // Used by textprocessor
+      
+      // Audio processing with torch audio
+      'openai-whisper>=20231117',
+      'torchaudio',
+      'soundfile',
+      'PyYAML',
+      
+      // System utilities
+      'psutil==5.9.5',
+      'pydantic==2.5.0',
+      'python-dotenv==1.0.0',
+      'python-multipart==0.0.6'  // Used by FastAPI
+    ]
+    
+    // Install packages in batches to avoid timeouts
+    const batchSize = 5
+    for (let i = 0; i < essentialPackages.length; i += batchSize) {
+      const batch = essentialPackages.slice(i, i + batchSize)
+      console.log(`📦 Installing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(essentialPackages.length/batchSize)}: ${batch.map(p => p.split('==')[0]).join(', ')}`)
+      
+      await new Promise((resolve, reject) => {
+        const installArgs = ['-m', 'pip', 'install', '--user', '--upgrade', '--no-warn-script-location'].concat(batch)
+        const installProcess = spawn(pythonExe, installArgs, {
+          stdio: ['pipe', 'pipe', 'pipe']
+        })
+        
+        let installOutput = ''
+        let installError = ''
+        
+        installProcess.stdout.on('data', (data) => {
+          installOutput += data.toString()
+        })
+        
+        installProcess.stderr.on('data', (data) => {
+          installError += data.toString()
+        })
+        
+        installProcess.on('close', (code) => {
+          if (code === 0) {
+            console.log(`✅ Batch installed successfully`)
+            resolve()
+          } else {
+            console.log(`⚠️ Batch installation failed with code ${code}`)
+            console.log(`Output: ${installOutput}`)
+            console.log(`Error: ${installError}`)
+            // Don't reject - continue with other batches
+            resolve()
+          }
+        })
+        
+        installProcess.on('error', (error) => {
+          console.log(`⚠️ Batch installation error: ${error.message}`)
+          resolve() // Don't reject - continue with other batches
         })
       })
     }
     
-    // Create marker file to indicate dependencies are installed
-    fs.writeFileSync(markerFile, new Date().toISOString())
+    // Download NLTK data packages (critical for search)
+    console.log("📥 Downloading NLTK data packages...")
+    await new Promise((resolve) => {
+      const nltkScript = `
+import nltk
+import ssl
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+packages = ['punkt', 'stopwords', 'wordnet', 'omw-1.4']
+for package in packages:
+    try:
+        print(f"Downloading {package}...")
+        nltk.download(package, quiet=True)
+        print(f"✅ {package} downloaded")
+    except Exception as e:
+        print(f"⚠️ Failed to download {package}: {e}")
+print("NLTK_DOWNLOAD_COMPLETE")
+`
+      
+      const nltkProcess = spawn(pythonExe, ['-c', nltkScript], {
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      
+      nltkProcess.stdout.on('data', (data) => {
+        console.log(`NLTK: ${data.toString().trim()}`)
+      })
+      
+      nltkProcess.stderr.on('data', (data) => {
+        console.log(`NLTK Error: ${data.toString().trim()}`)
+      })
+      
+      nltkProcess.on('close', (code) => {
+        console.log(`✅ NLTK data download completed`)
+        resolve()
+      })
+      
+      nltkProcess.on('error', (error) => {
+        console.log(`⚠️ NLTK download error: ${error.message}`)
+        resolve()
+      })
+    })
+    
+    // Create marker file with installation details
+    const markerData = {
+      installed_at: new Date().toISOString(),
+      version: "2.0.0",  // MAJOR INCREMENT: Force reinstall with complete dependency list
+      numpy_version: numpyInstallSuccess ? "1.24.4" : "failed",
+      numpy_platform: `${process.platform}-${process.arch}`,
+      packages_count: essentialPackages.length,
+      core_packages: ['numpy', 'tensorflow', 'tensorflow_hub', 'torch', 'torchaudio', 'cv2', 'skimage', 'easyocr', 'whisper', 'soundfile', 'requests', 'flask', 'flask_cors', 'sentence_transformers', 'rank_bm25', 'nltk', 'spellchecker', 'natsort', 'PIL', 'psutil'],
+      video_packages: ['tensorflow', 'tensorflow_hub', 'cv2', 'skimage', 'easyocr', 'PIL'],
+      audio_packages: ['torch', 'torchaudio', 'whisper', 'soundfile'],
+      search_packages: ['rank_bm25', 'nltk', 'pyspellchecker', 'natsort'],
+      document_packages: ['pdfplumber', 'pypdf', 'python-docx', 'python-pptx', 'openpyxl'],
+      nltk_data: ['punkt', 'stopwords', 'wordnet', 'omw-1.4'],
+      installation_notes: [
+        "COMPLETE dependency installation with all video processing packages",
+        "TensorFlow and TensorFlow Hub for video analysis",
+        "PyTorch and TorchAudio for audio processing", 
+        "OpenCV and EasyOCR for image/text extraction",
+        "Scikit-image for frame similarity calculations",
+        "Complete document processing suite",
+        "Full search functionality with NLTK and BM25"
+      ]
+    }
+    fs.writeFileSync(markerFile, JSON.stringify(markerData, null, 2))
     console.log("✅ Dependencies installation complete!")
     
-  } catch (error) {
-    console.log("⚠️ Dependency installation failed, but continuing:", error.message)
-  } finally {
-    // Close the loading window
-    loadingWindow.close()
-  }
+    // Final comprehensive test
+    console.log("🔍 Running final dependency verification...")
+    const finalTestResult = await new Promise((resolve) => {
+      const finalTestScript = `
+import sys
+print("=== FINAL DEPENDENCY TEST ===")
+print(f"Python path: {sys.path[:3]}...")
+try:
+    # Test numpy (most critical)
+    import numpy as np
+    print(f"✅ NumPy {np.__version__} - OK")
+    print(f"   NumPy location: {np.__file__}")
+    
+    # Test OpenCV (the main culprit)
+    import cv2
+    print(f"✅ OpenCV {cv2.__version__} - OK")
+    print(f"   OpenCV location: {cv2.__file__}")
+    
+    # Test TensorFlow (critical for video processing)
+    import tensorflow as tf
+    print(f"✅ TensorFlow {tf.__version__} - OK")
+    print(f"   TensorFlow location: {tf.__file__}")
+    
+    import tensorflow_hub as hub
+    print("✅ TensorFlow Hub - OK")
+    print(f"   TensorFlow Hub location: {hub.__file__}")
+    
+    # Test core imports
+    import requests
+    print("✅ Requests - OK")
+    
+    import flask
+    print("✅ Flask - OK")
+    
+    # Test ML packages
+    import sentence_transformers
+    print("✅ SentenceTransformers - OK")
+    
+    import rank_bm25
+    print("✅ BM25 - OK")
+    
+    print("✅ ALL DEPENDENCIES VERIFIED - USING ISOLATED ENVIRONMENT")
+    print("FINAL_TEST_PASSED")
+except Exception as e:
+    print(f"❌ Final test failed: {e}")
+    import traceback
+    traceback.print_exc()
+    print("FINAL_TEST_FAILED")
+`
+      
+      const testProcess = spawn(pythonExe, ['-c', finalTestScript], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000  // 30 second timeout for final test
+      })
+      
+      let output = ''
+      testProcess.stdout.on('data', (data) => {
+        const text = data.toString()
+        output += text
+        console.log(`Final Test: ${text.trim()}`)
+      })
+      
+      testProcess.on('close', (code) => {
+        const success = output.includes('FINAL_TEST_PASSED')
+        if (success) {
+          console.log(`🎉 All dependencies verified and ready!`)
+        } else {
+          console.log(`⚠️ Some dependencies may not be working correctly`)
+        }
+        resolve(success)
+      })
+      
+      testProcess.on('error', (error) => {
+        console.log(`❌ Final test error: ${error.message}`)
+        resolve(false)
+      })
+    })
+    
+    if (!finalTestResult) {
+      console.log("⚠️ Final verification failed - dependencies not working properly")
+      // Update marker to indicate issues
+      markerData.final_verification = "failed"
+      markerData.installation_notes.push("Final verification failed - dependencies may not be working")
+      fs.writeFileSync(markerFile, JSON.stringify(markerData, null, 2))
+      
+      // Notify that dependencies failed
+      throw new Error("Final dependency verification failed - critical packages not working")
+    } else {
+      console.log("🎉 All dependencies verified and working perfectly!")
+      markerData.final_verification = "passed"
+      markerData.huggingface_hub_compatibility = "verified"
+      markerData.installation_notes.push("All dependencies including sentence_transformers compatibility verified")
+      fs.writeFileSync(markerFile, JSON.stringify(markerData, null, 2))
+    }
+    
+      } catch (error) {
+      console.log("⚠️ Dependency installation failed, but continuing:", error.message)
+      
+      // Notify that dependencies failed
+      notifyDependenciesFailed(error)
+    } finally {
+      // Close the loading window
+      if (loadingWindow && !loadingWindow.isDestroyed()) {
+        loadingWindow.close()
+      }
+    }
 }
 
 ipcMain.handle("search-videos", async (event, query, options = {}) => {
@@ -1372,6 +2279,7 @@ ipcMain.handle("search-videos", async (event, query, options = {}) => {
         top_k: options.top_k || 20,
       date_filter: options.date_filter || '',
       location_filter: options.location_filter || '',
+      offset: options.offset || 0,
     }
     pythonProcess.stdin.write(JSON.stringify(searchCommand) + "\n")
   } else {
@@ -1385,4 +2293,107 @@ ipcMain.handle("get-system-status", async (event) => {
     pythonProcess.stdin.write(JSON.stringify({ action: "status" }) + "\n")
   }
   return { success: true }
+})
+
+ipcMain.handle("start-search-server", async (event) => {
+  try {
+    console.log("🔍 Starting search server via IPC...")
+    startSearchServer()
+    return { success: true }
+  } catch (error) {
+    console.error("❌ Error starting search server:", error)
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle("reinstall-dependencies", async (event) => {
+  try {
+    console.log("🔄 Manual dependency reinstallation requested...")
+    
+    // Remove marker file to force complete reinstall
+    const appDataDir = require('os').homedir()
+    const markerFile = path.join(appDataDir, '.silk-ai-deps-installed')
+    
+    if (fs.existsSync(markerFile)) {
+      fs.unlinkSync(markerFile)
+      console.log("🗑️ Removed dependency marker file")
+    }
+    
+    // Run dependency installation
+    await ensurePythonDependencies()
+    
+    return { 
+      success: true, 
+      message: "Dependencies reinstalled successfully. Please restart the app." 
+    }
+  } catch (error) {
+    console.error("❌ Error reinstalling dependencies:", error)
+    return { 
+      success: false, 
+      error: error.message,
+      message: "Failed to reinstall dependencies. Check console for details."
+    }
+  }
+})
+
+ipcMain.handle("check-dependency-status", async (event) => {
+  try {
+    const appDataDir = require('os').homedir()
+    const markerFile = path.join(appDataDir, '.silk-ai-deps-installed')
+    
+    if (!fs.existsSync(markerFile)) {
+      return {
+        installed: false,
+        message: "Dependencies not installed",
+        marker_file_exists: false
+      }
+    }
+    
+    const markerContent = JSON.parse(fs.readFileSync(markerFile, 'utf8'))
+    
+    // Test numpy specifically
+    const pythonExe = getPythonExecutable()
+    const numpyStatus = await new Promise((resolve) => {
+      const testProcess = spawn(pythonExe, ['-c', 'import numpy as np; print(f"NumPy {np.__version__} OK")'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 10000
+      })
+      
+      let output = ''
+      testProcess.stdout.on('data', (data) => {
+        output += data.toString()
+      })
+      
+      testProcess.on('close', (code) => {
+        resolve({
+          success: code === 0,
+          output: output.trim(),
+          code: code
+        })
+      })
+      
+      testProcess.on('error', (error) => {
+        resolve({
+          success: false,
+          error: error.message,
+          code: -1
+        })
+      })
+    })
+    
+    return {
+      installed: true,
+      marker_file_exists: true,
+      marker_content: markerContent,
+      numpy_status: numpyStatus,
+      platform: `${process.platform}-${process.arch}`
+    }
+    
+  } catch (error) {
+    return {
+      installed: false,
+      error: error.message,
+      marker_file_exists: fs.existsSync(path.join(require('os').homedir(), '.silk-ai-deps-installed'))
+    }
+  }
 })

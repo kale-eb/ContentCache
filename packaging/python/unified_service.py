@@ -23,18 +23,18 @@ import subprocess
 import time
 
 # Add the backend processing directory to path for imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
+# Use current working directory since we set cwd to Resources in main.js
+current_dir = os.getcwd()
+print(f"💻 Working directory: {current_dir}")
 
 # Try multiple possible locations for backend modules
 possible_backend_dirs = [
-    # Development location (relative to packaging/python/)
-    os.path.join(current_dir, '..', 'backend', 'processing'),
-    # Bundled location (in python-dist/backend/processing/)
-    os.path.join(current_dir, '..', 'python-dist', 'backend', 'processing'),
-    # Alternative bundled location (same level as python/)
+    # Packaged app location (Resources/backend/processing)
     os.path.join(current_dir, 'backend', 'processing'),
-    # Root project location (for development)
-    os.path.join(current_dir, '..', '..', 'backend', 'processing')
+    # Alternative packaged location
+    os.path.join(current_dir, 'python-dist', 'backend', 'processing'),
+    # Development location (fallback)
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'backend', 'processing'),
 ]
 
 backend_processing_dir = None
@@ -115,10 +115,6 @@ except ImportError as e:
     def tag_image(file_path): 
         print(f"🚫 FALLBACK: tag_image called - backend not available")
         return {"error": "Backend not available"}
-    class TextProcessor:
-        def process_file(self, file_path): 
-            print(f"🚫 FALLBACK: TextProcessor.process_file called - backend not available")
-            return {"error": "Backend not available"}
     def analyze_audio_with_openai(file_path): 
         print(f"🚫 FALLBACK: analyze_audio_with_openai called - backend not available")
         return {"error": "Backend not available"}
@@ -130,6 +126,14 @@ except ImportError as e:
     def get_video_metadata_path(): return "video_metadata.json"
     def get_text_metadata_path(): return "text_metadata.json"
     def get_image_metadata_path(): return "image_metadata.json"
+    
+    # Define fallback TextProcessor class for import failures
+    class TextProcessor:
+        def process_file(self, file_path): 
+            print(f"🚫 FALLBACK: TextProcessor.process_file called - backend import failed")
+            print(f"🔧 This suggests there was an import error in the backend modules")
+            return {"error": "Backend TextProcessor not available due to import failure", "file_path": file_path}
+
 
 # Auto-start search server if not running
 def check_and_start_search_server():
@@ -149,14 +153,12 @@ def check_and_start_search_server():
     
     # Try to find and start the search server
     possible_search_dirs = [
-        # Development location
-        os.path.join(current_dir, '..', 'backend', 'search'),
-        # Bundled location
-        os.path.join(current_dir, '..', 'python-dist', 'backend', 'search'),
-        # Alternative bundled location
+        # Packaged app location (Resources/backend/search)
         os.path.join(current_dir, 'backend', 'search'),
-        # Root project location
-        os.path.join(current_dir, '..', '..', 'backend', 'search')
+        # Alternative packaged location
+        os.path.join(current_dir, 'python-dist', 'backend', 'search'),
+        # Development location (fallback)
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'backend', 'search'),
     ]
     
     search_server_script = None
@@ -236,7 +238,7 @@ class ContentCacheService:
         """
         self.progress_callback = progress_callback
         self.stop_flag = stop_flag
-        self.text_processor = TextProcessor()
+        self._text_processor = None  # Lazy initialization
         self.search_server_url = "http://localhost:5001"
         
         # Supported file types
@@ -244,6 +246,28 @@ class ContentCacheService:
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp', '.heic'}
         self.text_extensions = {'.txt', '.md', '.pdf', '.docx', '.rtf'}
         self.audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'}
+    
+    @property
+    def text_processor(self):
+        """Lazy initialization of TextProcessor"""
+        if self._text_processor is None:
+            try:
+                # Access TextProcessor from global scope explicitly
+                TextProcessorClass = globals().get('TextProcessor')
+                if TextProcessorClass is None:
+                    raise NameError("TextProcessor not found in global scope")
+                self._text_processor = TextProcessorClass()
+                print("✅ TextProcessor initialized successfully")
+            except Exception as e:
+                print(f"❌ Error initializing TextProcessor: {e}")
+                print(f"🔧 Available globals: {list(globals().keys())[:10]}...")  # Debug info
+                # Fallback class
+                class FallbackTextProcessor:
+                    def process_file(self, file_path): 
+                        print(f"🚫 EMERGENCY FALLBACK: TextProcessor init failed - {str(e)}")
+                        return {"error": f"TextProcessor initialization failed: {str(e)}", "file_path": file_path}
+                self._text_processor = FallbackTextProcessor()
+        return self._text_processor
     
     def _emit_progress(self, stage: str, progress: float, message: str):
         """Emit progress update if callback is provided."""
@@ -287,11 +311,33 @@ class ContentCacheService:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
         
+        # Check stop flag at the beginning
+        if self.stop_flag and callable(self.stop_flag) and self.stop_flag():
+            return {
+                "file_path": file_path,
+                "filename": os.path.basename(file_path),
+                "processed_at": datetime.now().isoformat(),
+                "result": "Processing stopped by user",
+                "success": False,
+                "stopped": True
+            }
+
         file_type = self.detect_file_type(file_path)
         filename = os.path.basename(file_path)
         abs_path = os.path.abspath(file_path)
         
         self._emit_progress("detection", 10, f"Detected {file_type} file: {filename}")
+        
+        # Check stop flag again before metadata check
+        if self.stop_flag and callable(self.stop_flag) and self.stop_flag():
+            return {
+                "file_path": file_path,
+                "filename": filename,
+                "processed_at": datetime.now().isoformat(),
+                "result": "Processing stopped by user",
+                "success": False,
+                "stopped": True
+            }
         
         # Check if file is already processed
         is_already_processed = self._is_file_already_processed(abs_path, file_type)
@@ -311,18 +357,34 @@ class ContentCacheService:
                 "skipped": True
             }
         
+        # Check stop flag before starting processing
+        if self.stop_flag and callable(self.stop_flag) and self.stop_flag():
+            return {
+                "file_path": file_path,
+                "filename": filename,
+                "processed_at": datetime.now().isoformat(),
+                "result": "Processing stopped by user",
+                "success": False,
+                "stopped": True
+            }
+        
         print(f"🚀 Processing new file: {filename}")
         
         try:
             if file_type == 'video':
                 self._emit_progress("processing", 50, f"Processing video: {filename}")
-                print(f"🎥 Calling tag_video_smart_conflict_resolution for: {file_path}")
-                result = tag_video_smart_conflict_resolution(file_path)
+                print(f" Calling tag_video_smart_conflict_resolution for: {file_path}")
+                result = tag_video_smart_conflict_resolution(file_path, stop_flag=self.stop_flag)
                 print(f"🎥 Video processing result: {type(result)} - {str(result)[:200]}...")
                 
             elif file_type == 'image':
                 self._emit_progress("processing", 50, f"Processing image: {filename}")
-                result = tag_image(file_path)
+                # Check if tag_image accepts stop_flag (it might not, but we'll try)
+                try:
+                    result = tag_image(file_path, stop_flag=self.stop_flag)
+                except TypeError:
+                    # If it doesn't accept stop_flag, call without it
+                    result = tag_image(file_path)
                 
             elif file_type == 'text':
                 self._emit_progress("processing", 50, f"Processing text: {filename}")
@@ -330,7 +392,12 @@ class ContentCacheService:
                 
             elif file_type == 'audio':
                 self._emit_progress("processing", 50, f"Processing audio: {filename}")
-                result = analyze_audio_with_openai(file_path)
+                # Check if analyze_audio_with_openai accepts stop_flag
+                try:
+                    result = analyze_audio_with_openai(file_path, stop_flag=self.stop_flag)
+                except TypeError:
+                    # If it doesn't accept stop_flag, call without it
+                    result = analyze_audio_with_openai(file_path)
                 # Save metadata to ensure it persists
                 save_audio_metadata(file_path, result, get_audio_metadata_path())
                 
@@ -624,3 +691,6 @@ if __name__ == "__main__":
         print("  • audioanalyzer.py for audio files")
         print("  • tagdirectory.py for batch directory processing")
         print("  • search_server.py for search functionality") 
+
+# TextProcessor should be available from imports or fallback defined in error handler above
+# No need for additional fallback here 

@@ -111,18 +111,110 @@ async function installPythonPackages(pythonExe, requirementsPath) {
 }
 
 async function copyBackendModules() {
-  console.log('📋 Copying backend processing modules...')
+  console.log('📁 Copying backend processing modules...')
   
-  const sourceBackendDir = path.join(__dirname, '..', 'backend')
-  const destBackendDir = path.join(pythonDistDir, 'backend')
+  const backendDir = path.join(__dirname, '..', 'backend')
+  const pythonDistBackendDir = path.join(pythonDistDir, 'backend')
   
-  if (!fs.existsSync(sourceBackendDir)) {
-    console.log('⚠️ Backend source directory not found, skipping backend module copy')
-    return
+  console.log(`Source backend dir: ${backendDir}`)
+  console.log(`Destination dir: ${pythonDistBackendDir}`)
+  console.log(`Backend dir exists: ${fs.existsSync(backendDir)}`)
+  
+  // Ensure destination exists
+  fs.mkdirSync(pythonDistBackendDir, { recursive: true })
+  
+  // Copy processing modules
+  const processingSource = path.join(backendDir, 'processing')
+  const processingDest = path.join(pythonDistBackendDir, 'processing')
+  
+  console.log(`Processing source: ${processingSource}`)
+  console.log(`Processing dest: ${processingDest}`)
+  console.log(`Processing source exists: ${fs.existsSync(processingSource)}`)
+  
+  if (fs.existsSync(processingSource)) {
+    await copyDirectory(processingSource, processingDest)
+    console.log('✅ Copied processing modules')
+    
+    // Verify critical files were copied
+    const criticalFiles = ['videotagger.py', 'imageprocessor.py', 'config.py', 'unified_service.py']
+    const copiedFiles = []
+    const missingFiles = []
+    
+    for (const file of criticalFiles) {
+      const filePath = path.join(processingDest, file)
+      if (fs.existsSync(filePath)) {
+        copiedFiles.push(file)
+      } else {
+        missingFiles.push(file)
+      }
+    }
+    
+    console.log(`✅ Copied critical files: ${copiedFiles.join(', ')}`)
+    if (missingFiles.length > 0) {
+      console.warn(`⚠️ Missing critical files: ${missingFiles.join(', ')}`)
+    }
+    
+    // List all copied Python files for verification
+    try {
+      const allFiles = fs.readdirSync(processingDest).filter(f => f.endsWith('.py'))
+      console.log(`📋 All Python files copied: ${allFiles.length} files`)
+      allFiles.forEach(file => console.log(`   🐍 ${file}`))
+    } catch (error) {
+      console.error(`❌ Error listing copied files: ${error}`)
+    }
+    
+  } else {
+    console.error(`❌ Processing source directory not found: ${processingSource}`)
   }
   
-  // Copy the entire backend directory
-  await copyDirectory(sourceBackendDir, destBackendDir)
+  // Copy search modules including enhanced tokenizer
+  const searchSource = path.join(backendDir, 'search')
+  const searchDest = path.join(pythonDistBackendDir, 'search')
+  
+  console.log(`Search source: ${searchSource}`)
+  console.log(`Search dest: ${searchDest}`)
+  console.log(`Search source exists: ${fs.existsSync(searchSource)}`)
+  
+  if (fs.existsSync(searchSource)) {
+    await copyDirectory(searchSource, searchDest)
+    console.log('✅ Copied search modules (including enhanced tokenizer)')
+    
+    // Verify search files
+    const searchFiles = ['search_server.py', 'enhanced_tokenizer.py']
+    const copiedSearchFiles = []
+    
+    for (const file of searchFiles) {
+      const filePath = path.join(searchDest, file)
+      if (fs.existsSync(filePath)) {
+        copiedSearchFiles.push(file)
+      }
+    }
+    
+    console.log(`✅ Copied search files: ${copiedSearchFiles.join(', ')}`)
+  } else {
+    console.warn(`⚠️ Search source directory not found: ${searchSource}`)
+  }
+  
+  // Set correct permissions for macOS (especially important for Apple Silicon)
+  if (process.platform === 'darwin') {
+    console.log('🍎 Setting macOS permissions for backend modules...')
+    try {
+      // Make all Python files executable
+      const { exec } = require('child_process')
+      await new Promise((resolve, reject) => {
+        exec(`find "${pythonDistBackendDir}" -name "*.py" -exec chmod +x {} \\;`, (error, stdout, stderr) => {
+          if (error) {
+            console.warn(`⚠️ Permission setting warning: ${error}`)
+          }
+          resolve()
+        })
+      })
+      console.log('✅ Set macOS permissions')
+    } catch (error) {
+      console.warn(`⚠️ Could not set permissions: ${error}`)
+    }
+  }
+  
   console.log('✅ Backend modules copied successfully')
 }
 

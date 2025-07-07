@@ -11,6 +11,7 @@ pydantic==2.5.0
 
 # Image processing
 pillow>=10.4.0
+natsort==8.4.0
 
 # Moondream for image captioning
 moondream==0.1.0

@@ -4,75 +4,32 @@ from skimage.metrics import structural_similarity as ssim
 import numpy as np
 from pathlib import Path
 import shutil
-from natsort import natsorted
+import logging
+import sys
+
+# Setup logging with rotation to prevent large files
+from logging.handlers import RotatingFileHandler
+logging.basicConfig(
+    level=logging.WARNING,  # Only show warnings and errors, not INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        RotatingFileHandler('framesegmentation.log', maxBytes=1024*1024, backupCount=2)  # 1MB max, 2 backups
+    ]
+)
+logger = logging.getLogger(__name__)
+try:
+    from natsort import natsorted
+except ImportError:
+    # Fallback natural sorting if natsort is not available
+    def natsorted(iterable):
+        import re
+        def natural_key(text):
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+        return sorted(iterable, key=natural_key)
 import subprocess
 import gc
 from PIL import Image
-from config import get_temp_frames_dir
-
-def get_ffmpeg_path():
-    """Get the path to the bundled ffmpeg binary or system ffmpeg."""
-    # Try bundled ffmpeg first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffmpeg
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffmpeg'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffmpeg'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffmpeg'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffmpeg'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffmpeg'),
-    ]
-    
-    print(f"🔍 Looking for bundled ffmpeg from base directory: {current_dir}")
-    
-    for bundled_ffmpeg in possible_paths:
-        print(f"🔍 Checking ffmpeg at: {bundled_ffmpeg}")
-        if os.path.exists(bundled_ffmpeg):
-            print(f"✅ Found bundled ffmpeg: {bundled_ffmpeg}")
-            return bundled_ffmpeg
-        else:
-            print(f"❌ Not found at: {bundled_ffmpeg}")
-    
-    # Fallback to system ffmpeg
-    print("⚠️ Bundled ffmpeg not found, using system ffmpeg")
-    return 'ffmpeg'
-
-def get_ffprobe_path():
-    """Get the path to the bundled ffprobe binary or system ffprobe."""
-    # Try bundled ffprobe first (in packaged app)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check multiple possible locations for the bundled binary
-    possible_paths = [
-        # Packaged app structure: backend/processing -> ../../binaries/ffprobe
-        os.path.join(current_dir, '..', '..', 'binaries', 'ffprobe'),
-        # Alternative: go up to Resources and then to binaries  
-        os.path.join(current_dir, '..', '..', '..', 'binaries', 'ffprobe'),
-        # Try from the main app directory
-        os.path.join(current_dir, '..', '..', '..', '..', 'Resources', 'binaries', 'ffprobe'),
-        # Additional paths for different packaged app structures
-        os.path.join(current_dir, 'binaries', 'ffprobe'),
-        os.path.join(current_dir, '..', 'app.asar.unpacked', 'binaries', 'ffprobe'),
-    ]
-    
-    print(f"🔍 Looking for bundled ffprobe from base directory: {current_dir}")
-    
-    for bundled_ffprobe in possible_paths:
-        print(f"🔍 Checking ffprobe at: {bundled_ffprobe}")
-        if os.path.exists(bundled_ffprobe):
-            print(f"✅ Found bundled ffprobe: {bundled_ffprobe}")
-            return bundled_ffprobe
-        else:
-            print(f"❌ Not found at: {bundled_ffprobe}")
-    
-    # Fallback to system ffprobe
-    print("⚠️ Bundled ffprobe not found, using system ffprobe")
-    return 'ffprobe'
+from config import get_temp_frames_dir, get_ffmpeg_path, get_ffprobe_path
 
 def get_length(filename):
     result = subprocess.run([get_ffprobe_path(), "-v", "error", "-show_entries",
@@ -164,16 +121,27 @@ def split_frames(vid_path, compress_frames=False, max_pixels=1000):
     Returns:
         tuple: (frames_dir, metadata) - Returns the temp directory path and frame metadata
     """
+    logger.info(f"🎬 STARTING FRAME EXTRACTION: {vid_path}")
+    logger.info(f"📋 Parameters: compress_frames={compress_frames}, max_pixels={max_pixels}")
     print(f"🎬 Extracting frames{'(compressed)' if compress_frames else ''} to temp directory...")
-    frame_interval = calculate_keyframe_interval(get_length(vid_path))  # seconds between frames
+    
+    try:
+        video_length = get_length(vid_path)
+        frame_interval = calculate_keyframe_interval(video_length)
+        logger.info(f"📏 Video length: {video_length}s, frame interval: {frame_interval}s")
+    except Exception as e:
+        logger.error(f"❌ Failed to get video length: {e}")
+        raise
 
     # Use temporary directory instead of creating frames dir next to video
     frame_dir = get_temp_frames_dir(vid_path)
+    logger.info(f"📁 Using temp directory: {frame_dir}")
     print(f"📁 Using temp directory: {frame_dir}")
 
     # Extract frames using subprocess instead of ffmpeg library
     try:
         ffmpeg_path = get_ffmpeg_path()
+        logger.info(f"🔧 Using ffmpeg path: {ffmpeg_path}")
         
         # Build ffmpeg command
         cmd = [
@@ -185,13 +153,21 @@ def split_frames(vid_path, compress_frames=False, max_pixels=1000):
             f'{frame_dir}/frame_%06d.jpg'
         ]
         
+        logger.info(f"🔧 Running ffmpeg command: {' '.join(cmd)}")
         print(f"🔧 Running ffmpeg: {' '.join(cmd)}")
+        
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
+            logger.error(f"❌ FFmpeg failed with return code {result.returncode}")
+            logger.error(f"❌ FFmpeg stderr: {result.stderr}")
+            logger.error(f"❌ FFmpeg stdout: {result.stdout}")
             raise Exception(f"FFmpeg failed: {result.stderr}")
+        else:
+            logger.info(f"✅ FFmpeg extraction completed successfully")
             
     except Exception as e:
+        logger.error(f"❌ Error during frame extraction: {e}")
         print(f"❌ Error during frame extraction: {e}")
         # Clean up empty temp directory
         try:
@@ -202,7 +178,12 @@ def split_frames(vid_path, compress_frames=False, max_pixels=1000):
 
     frame_paths = natsorted([str(p) for p in Path(frame_dir).glob("*.jpg")])
     
+    logger.info(f"📊 Found {len(frame_paths)} extracted frames")
+    if frame_paths:
+        logger.info(f"📋 First few frames: {frame_paths[:3]}")
+    
     if not frame_paths:
+        logger.error(f"❌ No frames extracted from {vid_path}")
         print(f"❌ No frames extracted from {vid_path}")
         try:
             shutil.rmtree(frame_dir)

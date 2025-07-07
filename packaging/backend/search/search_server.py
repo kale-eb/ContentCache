@@ -2,10 +2,77 @@
 """
 Search Server for ContentCache
 Loads embeddings and metadata for all content types to provide fast semantic search functionality.
+
+CRITICAL: Environment isolation must happen BEFORE any imports
+to prevent conflicts with system NumPy 2.x and other incompatible packages.
 """
 
-import os
+# STEP 1: Setup isolated environment BEFORE any imports
 import sys
+import os
+from pathlib import Path
+
+def setup_isolated_environment():
+    """Setup isolated Python environment to avoid system package conflicts."""
+    print("🔧 [Search Server] Setting up isolated Python environment...")
+    
+    # Get the app cache directory
+    platform_name = os.uname().sysname if hasattr(os, 'uname') else 'Unknown'
+    if platform_name == 'Darwin':  # macOS
+        app_cache = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'silk.ai')
+    elif platform_name == 'Windows' or os.name == 'nt':
+        app_cache = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'silk.ai')
+    else:  # Linux and others
+        app_cache = os.path.join(os.path.expanduser('~'), '.config', 'silk.ai')
+    
+    user_base = os.path.join(app_cache, 'python_packages')
+    user_site_packages = os.path.join(user_base, 'lib', 'python', 'site-packages')
+    
+    print(f"📦 [Search Server] Using isolated packages from: {user_site_packages}")
+    
+    # Add our isolated packages to the FRONT of sys.path (highest priority)
+    if user_site_packages not in sys.path:
+        sys.path.insert(0, user_site_packages)
+        print(f"✅ [Search Server] Added {user_site_packages} to sys.path[0]")
+    
+    # Also add to PYTHONPATH for child processes
+    current_pythonpath = os.environ.get('PYTHONPATH', '')
+    if user_site_packages not in current_pythonpath:
+        new_pythonpath = user_site_packages + (os.pathsep + current_pythonpath if current_pythonpath else '')
+        os.environ['PYTHONPATH'] = new_pythonpath
+        print(f"✅ [Search Server] Updated PYTHONPATH")
+    
+    # Set user base for pip installations
+    os.environ['PYTHONUSERBASE'] = user_base
+    os.environ['PYTHONNOUSERSITE'] = '0'  # Allow user site packages
+    
+    print(f"🔧 [Search Server] Python path priority: {sys.path[:3]}...")
+    
+    # Test if we can import numpy from the correct location
+    try:
+        import numpy as np
+        print(f"✅ [Search Server] Using NumPy {np.__version__} from: {np.__file__}")
+        
+        # Verify it's NumPy 1.x
+        major_version = int(np.__version__.split('.')[0])
+        if major_version >= 2:
+            print(f"⚠️ [Search Server] WARNING: Found NumPy {np.__version__} (2.x) - may cause OpenCV issues")
+        else:
+            print(f"✅ [Search Server] NumPy {np.__version__} (1.x) - compatible with sentence-transformers")
+            
+    except ImportError as e:
+        print(f"❌ [Search Server] Could not import NumPy: {e}")
+        print(f"💡 [Search Server] Dependencies may need to be installed to: {user_site_packages}")
+
+# CRITICAL: Run environment setup before any other imports
+try:
+    setup_isolated_environment()
+except Exception as e:
+    print(f"⚠️ [Search Server] Isolated environment setup failed: {e}")
+    print("🔄 [Search Server] Falling back to system packages...")
+    # Continue with system packages - no sys.path modification
+
+# STEP 2: Now safe to import other modules
 import json
 import pickle
 import time
@@ -16,12 +83,63 @@ from typing import Dict, List, Tuple, Any, Optional, Union
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
-from sentence_transformers import SentenceTransformer, util
+
+# Critical imports with error handling
+try:
+    from sentence_transformers import SentenceTransformer, util
+    print("✅ [Search Server] Successfully imported sentence_transformers")
+except ImportError as e:
+    print(f"❌ [Search Server] Failed to import sentence_transformers: {e}")
+    print("💡 [Search Server] This may indicate NumPy/huggingface_hub compatibility issues")
+    # Let the error propagate - search server cannot function without this
+    raise
+
 import logging
-from pathlib import Path
+from rank_bm25 import BM25Okapi
+import re
+
+# Import enhanced tokenizer
+try:
+    from enhanced_tokenizer import get_enhanced_tokenizer
+    ENHANCED_TOKENIZER_AVAILABLE = True
+except ImportError:
+    try:
+        # Try relative import for packaged environment
+        from .enhanced_tokenizer import get_enhanced_tokenizer
+        ENHANCED_TOKENIZER_AVAILABLE = True
+    except ImportError:
+        try:
+            # Try absolute path import
+            import sys
+            import os
+            current_dir = os.path.dirname(__file__)
+            tokenizer_path = os.path.join(current_dir, 'enhanced_tokenizer.py')
+            if os.path.exists(tokenizer_path):
+                sys.path.append(current_dir)
+                from enhanced_tokenizer import get_enhanced_tokenizer
+                ENHANCED_TOKENIZER_AVAILABLE = True
+            else:
+                ENHANCED_TOKENIZER_AVAILABLE = False
+        except ImportError:
+            ENHANCED_TOKENIZER_AVAILABLE = False
 
 # --- Add backend/processing to Python path ---
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'processing'))
+# Use current working directory since we set cwd to Resources in main.js
+current_dir = os.getcwd()
+print(f"💻 [Search Server] Working directory: {current_dir}")
+
+# Add backend/processing to path
+backend_processing_dir = os.path.join(current_dir, 'backend', 'processing')
+if os.path.exists(backend_processing_dir):
+    sys.path.append(backend_processing_dir)
+    print(f"📁 [Search Server] Added to path: {backend_processing_dir}")
+else:
+    # Fallback for development
+    fallback_dir = os.path.join(os.path.dirname(__file__), '..', 'processing')
+    sys.path.append(fallback_dir)
+    print(f"📁 [Search Server] Fallback path: {fallback_dir}")
+
+print(f"🐍 [Search Server] Python path: {sys.path[:3]}...")
 
 # Handle both standalone script and module import
 try:
@@ -67,7 +185,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 def kill_processes_on_port(port):
-    """Kill any existing processes running on the specified port."""
+    """Kill any existing processes running on the specified port (except this process)."""
     try:
         print(f"🔍 Checking for existing processes on port {port}...")
         
@@ -77,20 +195,33 @@ def kill_processes_on_port(port):
         
         if result.returncode == 0 and result.stdout.strip():
             pids = result.stdout.strip().split('\n')
+            current_pid = os.getpid()
             print(f"🔄 Found {len(pids)} process(es) on port {port}: {', '.join(pids)}")
+            print(f"🔍 Current process PID: {current_pid}")
             
+            killed_any = False
             for pid in pids:
                 try:
                     pid_int = int(pid.strip())
+                    
+                    # Don't kill our own process!
+                    if pid_int == current_pid:
+                        print(f"⚠️ Skipping current process {pid_int} (this search server)")
+                        continue
+                    
                     print(f"🛑 Killing process {pid_int}...")
                     os.kill(pid_int, signal.SIGTERM)
                     print(f"✅ Killed process {pid_int}")
+                    killed_any = True
                 except (ValueError, ProcessLookupError, PermissionError) as e:
                     print(f"⚠️ Could not kill process {pid}: {e}")
             
-            # Wait a moment for processes to terminate
-            time.sleep(1)
-            print(f"✅ Port {port} cleanup completed")
+            if killed_any:
+                # Wait a moment for processes to terminate
+                time.sleep(1)
+                print(f"✅ Port {port} cleanup completed")
+            else:
+                print(f"✅ No other processes to kill on port {port}")
         else:
             print(f"✅ No existing processes found on port {port}")
             
@@ -130,6 +261,34 @@ class ContentCacheSearchServer:
             'image': {}
         }
         
+        # BM25 models for keyword search
+        self.bm25_models = {
+            'video': None,
+            'text': None,
+            'audio': None,
+            'image': None
+        }
+        self.bm25_documents = {
+            'video': [],
+            'text': [],
+            'audio': [],
+            'image': []
+        }
+        self.bm25_file_paths = {
+            'video': [],
+            'text': [],
+            'audio': [],
+            'image': []
+        }
+        
+        # Search result cache for ultra-fast repeated queries
+        self.search_cache = {}
+        self.max_cache_size = 100
+        
+        # Enhanced tokenizer for better BM25 search
+        self.tokenizer = None
+        self.tokenizer_capabilities = {}
+        
         self.embeddings_cache_dir = get_embeddings_cache_dir()
         self.model_cache_dir = get_models_cache_dir()
         
@@ -141,9 +300,40 @@ class ContentCacheSearchServer:
         self._setup_routes()
         
         print("🚀 Initializing ContentCache Search Server...")
+        self._initialize_tokenizer()
         self._load_models()
         self._load_embeddings_and_metadata()
+        self._build_bm25_indexes()
         print("✅ Search server ready!")
+
+    def _initialize_tokenizer(self):
+        """Initialize the enhanced tokenizer for better search quality."""
+        print("🔧 Initializing enhanced tokenizer...")
+        
+        if ENHANCED_TOKENIZER_AVAILABLE:
+            try:
+                self.tokenizer = get_enhanced_tokenizer()
+                self.tokenizer_capabilities = self.tokenizer.get_capabilities()
+                
+                # Log capabilities
+                capabilities_status = []
+                for feature, available in self.tokenizer_capabilities.items():
+                    status = "✅" if available else "⚠️"
+                    capabilities_status.append(f"{status} {feature.replace('_', ' ').title()}")
+                
+                print("📊 Tokenizer capabilities:")
+                for status in capabilities_status:
+                    print(f"  {status}")
+                
+                print("✅ Enhanced tokenizer ready!")
+                
+            except Exception as e:
+                print(f"⚠️ Enhanced tokenizer initialization failed: {e}")
+                print("🔄 Falling back to basic tokenization")
+                self.tokenizer = None
+        else:
+            print("⚠️ Enhanced tokenizer not available, using basic regex tokenization")
+            self.tokenizer = None
 
     def _setup_routes(self):
         """Setup Flask routes for the search API."""
@@ -182,8 +372,11 @@ class ContentCacheSearchServer:
                 
                 if not has_buckets:
                     # No filters found - fall back to regular search
-                    flat_results = self._perform_search(query, content_type, top_k)
-                    results = {'results': flat_results}
+                    search_response = self._perform_search(query, content_type, top_k)
+                    if isinstance(search_response, dict) and 'results' in search_response:
+                        results = search_response  # Enhanced search returns dict with metadata
+                    else:
+                        results = {'results': search_response}  # Fallback for basic search
                 
                 return jsonify({
                     'query': query,
@@ -198,6 +391,15 @@ class ContentCacheSearchServer:
             except Exception as e:
                 logger.error(f"Search error: {e}")
                 return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/health', methods=['GET'])
+        def health():
+            """Health check endpoint for the search server."""
+            return jsonify({
+                'status': 'healthy',
+                'server': 'contentcache-search',
+                'timestamp': time.time()
+            })
 
         @self.app.route('/status', methods=['GET'])
         def status():
@@ -295,6 +497,52 @@ class ContentCacheSearchServer:
             else:
                 return jsonify({'error': f'{content_type.title()} not found'}), 404
 
+        @self.app.route('/suggest', methods=['GET', 'POST'])
+        def suggest_query():
+            """Get spell-corrected suggestions for a search query."""
+            try:
+                if request.method == 'GET':
+                    query = request.args.get('q', '')
+                else:
+                    data = request.get_json() or {}
+                    query = data.get('query', '')
+                
+                if not query:
+                    return jsonify({'error': 'No query provided'}), 400
+                
+                suggestions = []
+                corrections = {}
+                
+                if self.tokenizer:
+                    # Get query suggestions
+                    suggestions = self.tokenizer.get_query_suggestions(query)
+                    
+                    # Get detailed corrections
+                    _, corrections = self.tokenizer.tokenize_and_process(
+                        query, 
+                        apply_spell_check=True,
+                        apply_stemming=False,  # Don't stem for suggestions
+                        remove_stopwords=False
+                    )
+                else:
+                    suggestions = [query]
+                
+                return jsonify({
+                    'original_query': query,
+                    'suggestions': suggestions,
+                    'corrections': corrections,
+                    'tokenizer_available': self.tokenizer is not None,
+                    'capabilities': self.tokenizer_capabilities
+                })
+                
+            except Exception as e:
+                logger.error(f"Query suggestion error: {e}")
+                return jsonify({
+                    'error': f'Failed to generate suggestions: {str(e)}',
+                    'original_query': query,
+                    'suggestions': [query]
+                }), 500
+
         @self.app.route('/refresh', methods=['POST'])
         def refresh_embeddings():
             """Manually refresh embeddings and metadata from disk."""
@@ -315,8 +563,29 @@ class ContentCacheSearchServer:
                     'image': {}
                 }
                 
+                # Clear BM25 indexes
+                self.bm25_models = {
+                    'video': None,
+                    'text': None,
+                    'audio': None,
+                    'image': None
+                }
+                self.bm25_documents = {
+                    'video': [],
+                    'text': [],
+                    'audio': [],
+                    'image': []
+                }
+                self.bm25_file_paths = {
+                    'video': [],
+                    'text': [],
+                    'audio': [],
+                    'image': []
+                }
+                
                 # Reload everything
                 self._load_embeddings_and_metadata()
+                self._build_bm25_indexes()  # Rebuild BM25 indexes with new data
                 
                 # Get new counts
                 total_metadata = sum(len(metadata) for metadata in self.content_metadata.values())
@@ -443,6 +712,222 @@ class ContentCacheSearchServer:
         if embeddings_loaded > 0:
             print(f"✅ Loaded {content_type} embeddings: {embeddings_loaded} items from {len(embedding_files)} cache files")
 
+    def _build_bm25_indexes(self):
+        """Build BM25 indexes for keyword search from metadata."""
+        print("🔧 Building BM25 indexes for keyword search...")
+        
+        for content_type in ['video', 'text', 'audio', 'image']:
+            documents = []
+            file_paths = []
+            
+            print(f"📋 Processing {content_type} content for BM25 indexing...")
+            processed_items = 0
+            
+            for file_path, metadata in self.content_metadata[content_type].items():
+                try:
+                    # Extract searchable text from metadata
+                    text_parts = []
+                    
+                    if content_type == 'video':
+                        # COMPREHENSIVE video indexing
+                        # 1. Video summary
+                        summary = metadata.get('video_summary', '')
+                        if summary and summary != "Video analysis unavailable due to API server error.":
+                            text_parts.append(summary)
+                        
+                        # 2. All tag categories
+                        tags = metadata.get('tags', {})
+                        for tag_category, tag_list in tags.items():
+                            if isinstance(tag_list, list):
+                                text_parts.extend([tag for tag in tag_list if tag])  # Filter empty strings
+                            elif isinstance(tag_list, str) and tag_list:
+                                text_parts.append(tag_list)
+                        
+                        # 3. Frame captions (if available)
+                        frame_captions = metadata.get('frame_captions', [])
+                        if isinstance(frame_captions, list):
+                            text_parts.extend(frame_captions)
+                        elif isinstance(frame_captions, str):
+                            text_parts.append(frame_captions)
+                        
+                        # 4. Audio summary/transcript
+                        audio_summary = metadata.get('audio_summary', '')
+                        if audio_summary:
+                            if isinstance(audio_summary, dict):
+                                # Extract text from audio analysis dict
+                                audio_text = audio_summary.get('text', '') or audio_summary.get('transcript', '') or audio_summary.get('summary', '')
+                                if audio_text:
+                                    text_parts.append(audio_text)
+                            elif isinstance(audio_summary, str):
+                                text_parts.append(audio_summary)
+                        
+                        # 5. OCR text from frames (prominent text)
+                        text_data = metadata.get('text_data', {})
+                        if text_data:
+                            prominent_text = text_data.get('prominent_text', [])
+                            if isinstance(prominent_text, list):
+                                text_parts.extend(prominent_text)
+                            elif isinstance(prominent_text, str):
+                                text_parts.append(prominent_text)
+                        
+                        # 6. Enhanced vision analysis
+                        vision_analysis = metadata.get('vision_analysis', '')
+                        if vision_analysis:
+                            text_parts.append(vision_analysis)
+                        
+                        # 7. Location information
+                        location_info = metadata.get('metadata', {}).get('location', '')
+                        if location_info and location_info.lower() not in ['none', 'null', '']:
+                            text_parts.append(location_info)
+                        
+                        # 8. Any additional description metadata
+                        included_description = metadata.get('metadata', {}).get('included_description', '')
+                        if included_description and included_description.lower() not in ['none', 'null', '']:
+                            text_parts.append(included_description)
+                    
+                    elif content_type == 'text':
+                        # ENHANCED text indexing - include actual document content!
+                        analysis = metadata.get('analysis', {})
+                        summary = analysis.get('summary', '')
+                        if summary:
+                            text_parts.append(summary)
+                        
+                        # Include key topics extracted by AI
+                        key_topics = analysis.get('key_topics', [])
+                        if isinstance(key_topics, list):
+                            text_parts.extend(key_topics)
+                        
+                        # Include actual document content preview (HUGE for search!)
+                        content_preview = metadata.get('content_preview', '')
+                        if content_preview:
+                            text_parts.append(content_preview)
+                        
+                        # Legacy content field
+                        content = metadata.get('content', '')
+                        if content:
+                            text_parts.append(content)
+                    
+                    elif content_type == 'image':
+                        # COMPREHENSIVE image indexing
+                        # 1. Image summary
+                        image_summary = metadata.get('image_summary', '')
+                        if image_summary:
+                            text_parts.append(image_summary)
+                        
+                        # 2. All tag categories
+                        tags = metadata.get('tags', {})
+                        for tag_category, tag_list in tags.items():
+                            if isinstance(tag_list, list):
+                                text_parts.extend([tag for tag in tag_list if tag])  # Filter empty strings
+                            elif isinstance(tag_list, str) and tag_list:
+                                text_parts.append(tag_list)
+                        
+                        # 3. OCR text (if available)
+                        ocr_text = metadata.get('ocr_text', '')
+                        if ocr_text:
+                            text_parts.append(ocr_text)
+                        
+                        # 4. Location information
+                        location_info = metadata.get('metadata', {}).get('location', '')
+                        if location_info and location_info.lower() not in ['none', 'null', '']:
+                            text_parts.append(location_info)
+                        
+                        # 5. Included description
+                        included_description = metadata.get('metadata', {}).get('included_description', '')
+                        if included_description and included_description.lower() not in ['none', 'null', '']:
+                            text_parts.append(included_description)
+                        
+                        # Also check for analysis field (backward compatibility)
+                        analysis = metadata.get('analysis', '')
+                        if analysis:
+                            text_parts.append(analysis)
+                            
+                    elif content_type == 'audio':
+                        # For audio, use analysis content
+                        analysis = metadata.get('analysis', '')
+                        if analysis:
+                            text_parts.append(analysis)
+                        
+                        # Also check for transcript
+                        transcript = metadata.get('transcript', '')
+                        if transcript:
+                            text_parts.append(transcript)
+                    
+                    # Add filename as searchable text
+                    filename = os.path.basename(file_path)
+                    text_parts.append(filename)
+                    
+                    # Combine all text and tokenize
+                    full_text = ' '.join(filter(None, text_parts))  # Filter out empty strings
+                    if full_text.strip():
+                        # Use enhanced tokenizer if available, fallback to basic regex
+                        if self.tokenizer:
+                            try:
+                                tokens, corrections = self.tokenizer.tokenize_and_process(
+                                    full_text,
+                                    apply_spell_check=False,  # Don't spell-check content, only queries
+                                    apply_stemming=True,
+                                    remove_stopwords=True,
+                                    min_length=2
+                                )
+                                if corrections:
+                                    print(f"🔧 Applied corrections during indexing: {corrections}")
+                            except Exception as e:
+                                print(f"⚠️ Enhanced tokenizer failed for {file_path}: {e}")
+                                # Fallback to basic tokenization
+                                tokens = re.findall(r'\b\w+\b', full_text.lower())
+                        else:
+                            # Fallback to basic tokenization
+                            tokens = re.findall(r'\b\w+\b', full_text.lower())
+                        
+                        if tokens:  # Only add if we got tokens
+                            documents.append(tokens)
+                            file_paths.append(file_path)
+                            processed_items += 1
+                            
+                            # Debug logging for specific terms
+                            if any(term in tokens for term in ['passport', 'identification']):
+                                print(f"🔍 Found search term in {content_type}: {os.path.basename(file_path)} - tokens: {[t for t in tokens if t in ['passport', 'identification']]}")
+                    
+                except Exception as e:
+                    print(f"⚠️ Error processing {file_path} for BM25 indexing: {e}")
+                    continue
+            
+            print(f"📊 {content_type.title()}: processed {processed_items} items from {len(self.content_metadata[content_type])} total")
+            
+            if documents:
+                try:
+                    self.bm25_models[content_type] = BM25Okapi(documents)
+                    self.bm25_documents[content_type] = documents
+                    self.bm25_file_paths[content_type] = file_paths
+                    print(f"✅ Built BM25 index for {content_type}: {len(documents)} documents")
+                except Exception as e:
+                    print(f"⚠️ Failed to build BM25 index for {content_type}: {e}")
+            else:
+                print(f"⚠️ No documents found for {content_type} BM25 index")
+        
+        print("✅ BM25 indexes ready!")
+        
+        # Test search for common terms
+        test_terms = ['passport', 'identification', 'document']
+        print("🧪 Testing BM25 indexes with common search terms...")
+        for term in test_terms:
+            total_matches = 0
+            for content_type in ['video', 'text', 'audio', 'image']:
+                if self.bm25_models[content_type] is not None:
+                    try:
+                        scores = self.bm25_models[content_type].get_scores([term])
+                        matches = sum(1 for score in scores if score > 0)
+                        total_matches += matches
+                        if matches > 0:
+                            print(f"  📋 '{term}' found in {matches} {content_type} items")
+                    except Exception as e:
+                        print(f"  ⚠️ Error testing '{term}' in {content_type}: {e}")
+            if total_matches == 0:
+                print(f"  ❌ '{term}' not found in any indexed content!")
+            else:
+                print(f"  ✅ '{term}' found in {total_matches} total items")
+
     def _auto_sync_embeddings_if_needed(self):
         """Automatically sync embeddings if discrepancies are detected."""
         print("\n🔍 Checking embedding synchronization...")
@@ -470,7 +955,7 @@ class ContentCacheSearchServer:
         
         # Import embedding generator
         try:
-            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'processing'))
+            # Path already added at top of file, no need to add again
             from embedding_generator import generate_embeddings_from_metadata_file
         except ImportError as e:
             print(f"❌ Failed to import embedding generator: {e}")
@@ -561,9 +1046,15 @@ class ContentCacheSearchServer:
             print("✅ All embeddings are perfectly synced!")
 
     def _perform_search(self, query: str, content_type: str = 'all', top_k: int = 10) -> List[Dict]:
-        """Perform semantic search with intelligent filtering on results."""
+        """Perform hybrid search combining keyword (BM25) and semantic similarity with OR logic."""
         if not self.sentence_model:
             raise RuntimeError("SentenceTransformer model not loaded")
+        
+        # ULTRA-FAST: Check cache first
+        cache_key = f"{query.lower()}:{content_type}:{top_k}"
+        if cache_key in self.search_cache:
+            print("⚡ Cache hit: Returning cached results (sub-millisecond)")
+            return self.search_cache[cache_key]
         
         # Parse the query using OpenAI to extract semantic components
         try:
@@ -589,60 +1080,71 @@ class ContentCacheSearchServer:
             search_radius = None
             date_filter = None
         
-        # Step 1: Perform semantic search with threshold
         search_types = ['video', 'text', 'audio', 'image'] if content_type == 'all' else [content_type]
         
-        # Collect all embeddings to search
-        all_embeddings = {}
-        for ctype in search_types:
-            all_embeddings.update({
-                f"{ctype}:{path}": embedding 
-                for path, embedding in self.content_embeddings[ctype].items()
-            })
+        # Step 1: Perform keyword search (BM25) - FASTEST
+        keyword_results = {}  # {file_path: score}
+        spell_corrections = {}
         
-        semantic_results = []
-        if all_embeddings:
-            # Encode the core search query (without location/date terms)
-            query_embedding = self.sentence_model.encode([core_query])
+        # Enhanced query tokenization with spell checking
+        if self.tokenizer:
+            query_tokens, spell_corrections = self.tokenizer.tokenize_and_process(
+                core_query,
+                apply_spell_check=True,   # Apply spell checking to queries
+                apply_stemming=True,
+                remove_stopwords=True,
+                min_length=2
+            )
             
-            # Calculate similarities
-            similarities = []
-            for type_path, embedding in all_embeddings.items():
-                if embedding is not None:
-                    # Handle different embedding formats
-                    if isinstance(embedding, list):
-                        embedding = np.array(embedding)
+            if spell_corrections:
+                print(f"🔤 Applied spell corrections: {spell_corrections}")
+        else:
+            # Fallback to basic tokenization
+            query_tokens = re.findall(r'\b\w+\b', core_query.lower())
+        
+        for ctype in search_types:
+            if self.bm25_models[ctype] is not None:
+                try:
+                    scores = self.bm25_models[ctype].get_scores(query_tokens)
+                    file_paths = self.bm25_file_paths[ctype]
                     
-                    # Calculate cosine similarity
-                    similarity = util.pytorch_cos_sim(query_embedding, embedding).item()
-                    similarities.append((type_path, similarity))
+                    for i, score in enumerate(scores):
+                        if i < len(file_paths):
+                            normalized_score = min(score / 10.0, 1.0)  # Normalize BM25 scores to 0-1 range
+                            if normalized_score >= 0.3:  # 30% threshold for keyword
+                                keyword_results[file_paths[i]] = {
+                                    'score': normalized_score,
+                                    'type': ctype,
+                                    'search_type': 'keyword'
+                                }
+                except Exception as e:
+                    print(f"⚠️ BM25 search failed for {ctype}: {e}")
+        
+        print(f"🔍 Keyword search: {len(keyword_results)} results above 30% threshold")
+        
+        # SPEED OPTIMIZATION: If BM25 found enough results, skip semantic search for common queries
+        if len(keyword_results) >= top_k and len(query_tokens) <= 3:  # Short queries with good BM25 results
+            print("⚡ Fast path: Using keyword-only results (sufficient matches found)")
             
-            # Filter by similarity threshold (0.25) and sort
-            filtered_similarities = [(tp, sim) for tp, sim in similarities if sim >= 0.25]
-            filtered_similarities.sort(key=lambda x: x[1], reverse=True)
-            
-            print(f"🔍 Semantic search: {len(similarities)} total, {len(filtered_similarities)} above 0.25 threshold")
-            
-            # Format semantic results
-            for type_path, similarity in filtered_similarities:
-                # Parse content type and path
-                ctype, file_path = type_path.split(':', 1)
+            # Format and return BM25-only results
+            formatted_results = []
+            for file_path, search_data in keyword_results.items():
+                ctype = search_data['type']
                 
                 result = {
                     'type': ctype,
                     'content_type': ctype,
                     'file_path': file_path,
                     'filename': os.path.basename(file_path),
-                    'score': round(similarity, 4),
-                    'similarity_score': round(similarity, 4),
-                    'search_type': 'semantic'
+                    'score': round(search_data['score'], 4),
+                    'similarity_score': round(search_data['score'], 4),
+                    'search_type': search_data['search_type']
                 }
                 
-                # Add metadata from content metadata
+                # Add metadata
                 if file_path in self.content_metadata[ctype]:
                     metadata = self.content_metadata[ctype][file_path]
                     
-                    # Add content-specific metadata
                     if ctype == 'video':
                         summary = metadata.get('video_summary', '')
                         result['summary'] = summary[:200] + '...' if len(summary) > 200 else summary
@@ -658,18 +1160,146 @@ class ContentCacheSearchServer:
                         result['summary'] = analysis[:200] + '...' if len(analysis) > 200 else analysis
                         result['content'] = result['summary']
                 
-                semantic_results.append(result)
+                formatted_results.append(result)
+            
+            # Sort by score and apply filters
+            formatted_results.sort(key=lambda x: x['score'], reverse=True)
+            
+            # Apply location filtering if specified
+            if location_text:
+                formatted_results = self._apply_location_filter(formatted_results, location_text, search_radius)
+            
+            # Apply date filtering if specified  
+            if date_filter:
+                formatted_results = self._apply_date_filter_with_buckets(formatted_results, date_filter)
+            
+            return formatted_results[:top_k]
         
-        # Step 2: Apply location filtering if specified
+        # Step 2: Perform semantic search (slower but more comprehensive)
+        semantic_results = {}  # {file_path: score}
+        all_embeddings = {}
+        for ctype in search_types:
+            all_embeddings.update({
+                f"{ctype}:{path}": embedding 
+                for path, embedding in self.content_embeddings[ctype].items()
+            })
+        
+        if all_embeddings:
+            query_embedding = self.sentence_model.encode([core_query])
+            
+            for type_path, embedding in all_embeddings.items():
+                if embedding is not None:
+                    try:
+                        if isinstance(embedding, list):
+                            embedding = np.array(embedding)
+                        
+                        similarity = util.pytorch_cos_sim(query_embedding, embedding).item()
+                        
+                        if similarity >= 0.3:  # 30% threshold for semantic
+                            ctype, file_path = type_path.split(':', 1)
+                            semantic_results[file_path] = {
+                                'score': similarity,
+                                'type': ctype,
+                                'search_type': 'semantic'
+                            }
+                    except Exception as e:
+                        print(f"⚠️ Semantic search failed for {type_path}: {e}")
+        
+        print(f"🔍 Semantic search: {len(semantic_results)} results above 30% threshold")
+        
+        # Step 3: Combine results using OR logic
+        all_results = {}
+        
+        # Add keyword results
+        for file_path, data in keyword_results.items():
+            all_results[file_path] = data
+        
+        # Add semantic results (prefer higher scores)
+        for file_path, data in semantic_results.items():
+            if file_path in all_results:
+                # File found by both methods - use the higher score
+                if data['score'] > all_results[file_path]['score']:
+                    all_results[file_path] = data
+                    all_results[file_path]['search_type'] = 'hybrid'
+                else:
+                    all_results[file_path]['search_type'] = 'hybrid'
+            else:
+                all_results[file_path] = data
+        
+        print(f"🎯 Combined search: {len(all_results)} unique results (OR logic)")
+        
+        # Step 4: Format results with metadata
+        formatted_results = []
+        for file_path, search_data in all_results.items():
+            ctype = search_data['type']
+            
+            result = {
+                'type': ctype,
+                'content_type': ctype,
+                'file_path': file_path,
+                'filename': os.path.basename(file_path),
+                'score': round(search_data['score'], 4),
+                'similarity_score': round(search_data['score'], 4),
+                'search_type': search_data['search_type']
+            }
+            
+            # Add metadata
+            if file_path in self.content_metadata[ctype]:
+                metadata = self.content_metadata[ctype][file_path]
+                
+                if ctype == 'video':
+                    summary = metadata.get('video_summary', '')
+                    result['summary'] = summary[:200] + '...' if len(summary) > 200 else summary
+                    result['content'] = result['summary']
+                    result['tags'] = metadata.get('tags', {})
+                elif ctype == 'text':
+                    summary = metadata.get('analysis', {}).get('summary', '')
+                    result['summary'] = summary
+                    result['content'] = summary
+                    result['file_type'] = metadata.get('file_type', '')
+                elif ctype in ['image', 'audio']:
+                    analysis = metadata.get('analysis', '')
+                    result['summary'] = analysis[:200] + '...' if len(analysis) > 200 else analysis
+                    result['content'] = result['summary']
+            
+            formatted_results.append(result)
+        
+        # Step 5: Sort by score and apply filters
+        formatted_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Apply location filtering if specified
         if location_text:
-            semantic_results = self._apply_location_filter(semantic_results, location_text, search_radius)
+            formatted_results = self._apply_location_filter(formatted_results, location_text, search_radius)
         
-        # Step 3: Apply date filtering with bucketing if specified
+        # Apply date filtering if specified
         if date_filter:
-            semantic_results = self._apply_date_filter_with_buckets(semantic_results, date_filter)
+            formatted_results = self._apply_date_filter_with_buckets(formatted_results, date_filter)
         
-        # Return top results
-        return semantic_results[:top_k]
+        final_results = formatted_results[:top_k]
+        
+        # Prepare response with metadata
+        response_data = {
+            'results': final_results,
+            'search_metadata': {
+                'original_query': query,
+                'processed_query': core_query,
+                'spell_corrections': spell_corrections,
+                'query_tokens': query_tokens if 'query_tokens' in locals() else [],
+                'tokenizer_used': 'enhanced' if self.tokenizer else 'basic',
+                'capabilities': self.tokenizer_capabilities
+            }
+        }
+        
+        # Cache the results for future queries
+        if len(self.search_cache) >= self.max_cache_size:
+            # Simple LRU: remove oldest entry
+            oldest_key = next(iter(self.search_cache))
+            del self.search_cache[oldest_key]
+        
+        self.search_cache[cache_key] = response_data
+        print(f"📊 Cached search results for future queries")
+        
+        return response_data
     
     def _perform_search_with_buckets(self, query: str, content_type: str = 'all', top_k: int = 20, 
                                    date_filter: str = '', location_filter: str = '') -> Dict[str, Any]:
@@ -781,7 +1411,11 @@ class ContentCacheSearchServer:
         
         # Remove empty buckets and limit results per bucket
         final_buckets = {}
-        max_per_bucket = max(8, top_k // len([k for k, v in buckets.items() if v]))  # At least 8 per bucket
+        non_empty_buckets = [k for k, v in buckets.items() if v]
+        if non_empty_buckets:
+            max_per_bucket = max(8, top_k // len(non_empty_buckets))  # At least 8 per bucket
+        else:
+            max_per_bucket = 8  # Default when no buckets have results
         
         for bucket_name, bucket_results in buckets.items():
             if bucket_results:  # Only include non-empty buckets
@@ -1188,7 +1822,29 @@ class ContentCacheSearchServer:
         total_embeddings = sum(len(embeddings) for embeddings in self.content_embeddings.values())
         total_metadata = sum(len(metadata) for metadata in self.content_metadata.values())
         
-        # Kill any existing processes on the port before starting
+        # Check if we can connect to the port to see if server is already running
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('localhost', self.port))
+            sock.close()
+            
+            if result == 0:
+                # Port is already in use - check if it's a search server
+                try:
+                    import requests
+                    response = requests.get(f"http://localhost:{self.port}/status", timeout=2)
+                    if response.status_code == 200:
+                        print(f"✅ Search server already running on port {self.port}")
+                        print("⚠️ Aborting startup to prevent conflicts")
+                        return
+                except:
+                    pass  # Not a search server, proceed with cleanup
+        except:
+            pass  # Can't check, proceed normally
+        
+        # Kill any existing processes on the port before starting (but not ourselves)
         kill_processes_on_port(self.port)
         
         print(f"🌐 Starting search server on http://localhost:{self.port}")

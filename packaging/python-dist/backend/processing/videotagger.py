@@ -87,6 +87,19 @@ api_client.use_api_server()  # Uses environment variable CONTENTCACHE_API_URL or
 try:
     # Suppress EasyOCR warnings during initialization
     import logging
+    import sys
+    
+    # Setup logging for videotagger with rotation to prevent large files
+    from logging.handlers import RotatingFileHandler
+    logging.basicConfig(
+        level=logging.WARNING,  # Only show warnings and errors, not INFO
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler('videotagger.log', maxBytes=1024*1024, backupCount=2)  # 1MB max, 2 backups
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
     logging.getLogger('easyocr').setLevel(logging.ERROR)
     easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)  # Set verbose=False
     print("✅ EasyOCR initialized for video text extraction")
@@ -767,15 +780,23 @@ def tag_video_smart_conflict_resolution(vid_path, use_moondream=False, use_moond
     3. Combine results for final analysis
     """
     
+    logger.info(f"🎬 STARTING VIDEO PROCESSING: {vid_path}")
+    logger.info(f"📋 Parameters: moondream={use_moondream}, moondream_api={use_moondream_api}, compress={compress_frames}, max_pixels={max_pixels}")
+    
     # Set up API client with stop callback
     try:
         client = api_client.get_api_client()
+        logger.info("✅ API client configured successfully")
         print("✅ API client configured")
     except Exception as e:
+        logger.error(f"⚠️ Could not configure API client: {e}")
         print(f"⚠️ Could not configure API client: {e}")
     
     memory_start = get_memory_usage()
     
+    logger.info(f"🔍 Starting CONCURRENT video analysis for: {vid_path}")
+    logger.info(f"🧵 Using multithreading for: OCR, GPT-4o Vision, Moondream API, Audio")
+    logger.info(f"📊 Initial memory usage: {memory_start:.1f} MB")
     print(f"🔍 Starting CONCURRENT video analysis for: {vid_path}")
     print(f"🧵 Using multithreading for: OCR, GPT-4o Vision, Moondream API, Audio")
     print(f"📊 Initial memory usage: {memory_start:.1f} MB")

@@ -10,6 +10,87 @@ import time
 import sys
 from pathlib import Path
 
+# Global FFmpeg paths - set once at startup
+_ffmpeg_path = None
+_ffprobe_path = None
+
+def setup_ffmpeg_paths():
+    """
+    One-time setup of FFmpeg and FFprobe paths.
+    Call this once at the beginning of tagdirectory processing.
+    
+    Returns:
+        tuple: (ffmpeg_path, ffprobe_path)
+    """
+    global _ffmpeg_path, _ffprobe_path
+    
+    if _ffmpeg_path is not None and _ffprobe_path is not None:
+        # Already set up
+        return _ffmpeg_path, _ffprobe_path
+    
+    print("🔧 Setting up FFmpeg and FFprobe paths...")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Check multiple possible locations for the bundled binaries
+    possible_paths = [
+        # Packaged app structure
+        os.path.join(current_dir, '..', '..', 'binaries'),
+        os.path.join(current_dir, '../../binaries'),
+        # Development structure
+        os.path.join(current_dir, '../../../binaries'),
+        # Look relative to current working directory
+        './binaries',
+        '../binaries',
+        '../../binaries',
+        # Absolute path for packaged app
+        '/Applications/silk.ai.app/Contents/Resources/binaries',
+    ]
+    
+    ffmpeg_path = None
+    ffprobe_path = None
+    
+    for base_path in possible_paths:
+        abs_path = os.path.abspath(base_path)
+        
+        potential_ffmpeg = os.path.join(abs_path, 'ffmpeg')
+        potential_ffprobe = os.path.join(abs_path, 'ffprobe')
+        
+        if os.path.exists(potential_ffmpeg) and os.path.exists(potential_ffprobe):
+            ffmpeg_path = potential_ffmpeg
+            ffprobe_path = potential_ffprobe
+            print(f"✅ Found bundled ffmpeg: {ffmpeg_path}")
+            break
+    
+    # Fallback to system PATH
+    if not ffmpeg_path:
+        import shutil
+        ffmpeg_path = shutil.which('ffmpeg')
+        ffprobe_path = shutil.which('ffprobe')
+        if ffmpeg_path and ffprobe_path:
+            print(f"✅ Using system ffmpeg: {ffmpeg_path}")
+        else:
+            raise RuntimeError("FFmpeg and FFprobe not found in bundled binaries or system PATH")
+    
+    # Cache the paths globally
+    _ffmpeg_path = ffmpeg_path
+    _ffprobe_path = ffprobe_path
+    
+    return _ffmpeg_path, _ffprobe_path
+
+def get_ffmpeg_path():
+    """Get FFmpeg path (set up if needed)"""
+    global _ffmpeg_path
+    if _ffmpeg_path is None:
+        setup_ffmpeg_paths()
+    return _ffmpeg_path
+
+def get_ffprobe_path():
+    """Get FFprobe path (set up if needed)"""
+    global _ffprobe_path
+    if _ffprobe_path is None:
+        setup_ffmpeg_paths()
+    return _ffprobe_path
+
 # Base directories
 def get_app_cache_dir():
     """Get the main application cache directory."""
@@ -47,7 +128,10 @@ def get_embeddings_cache_dir():
     return embeddings_dir
 
 def get_temp_frames_dir(video_path):
-    """Get a temporary directory for video frames."""
+    """
+    Create and return a temporary directory for frame extraction.
+    Uses video filename to create a descriptive directory name.
+    """
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     timestamp = int(time.time())
     temp_dir = os.path.join(tempfile.gettempdir(), f"contentcache_{video_name}_frames_{timestamp}")

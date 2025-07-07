@@ -14,8 +14,21 @@ import io
 import math
 import json
 from dotenv import load_dotenv
+import logging
+import sys
 # NOTE: OpenAI import removed - packaged app uses Railway API for all AI calls
 from config import get_models_cache_dir
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('framestagging.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()

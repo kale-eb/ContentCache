@@ -38,7 +38,7 @@ try:
     from videotagger import tag_video
     from audioprocessor import process_audio  
     from imageprocessor import process_image
-    from textprocessor import process_text_file
+    from textprocessor import TextProcessor
 except ImportError as e:
     print(f"Warning: Some processing modules not available: {e}")
 
@@ -148,7 +148,7 @@ class ContentCacheService:
                 
             elif file_type == "text":
                 self._emit_progress("text_processing", 40, f"Processing text document...")
-                result = process_text_file(abs_path)
+                result = self.text_processor.process_file(abs_path)
                 
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")

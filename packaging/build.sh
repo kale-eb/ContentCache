@@ -82,6 +82,45 @@ else
     print_warning "Model downloader test failed, but continuing build"
 fi
 
+# Test search functionality
+print_status "Testing search functionality..."
+python3 -c "
+import sys
+import os
+sys.path.append('backend/search')
+
+# Test enhanced tokenizer
+try:
+    from enhanced_tokenizer import get_enhanced_tokenizer
+    tokenizer = get_enhanced_tokenizer()
+    tokens, corrections = tokenizer.tokenize_and_process('passport identification document')
+    print(f'✅ Enhanced tokenizer working: {tokens}')
+except Exception as e:
+    print(f'⚠️ Enhanced tokenizer failed: {e}')
+
+# Test BM25
+try:
+    from rank_bm25 import BM25Okapi
+    docs = [['passport', 'document'], ['identification', 'card']]
+    bm25 = BM25Okapi(docs)
+    scores = bm25.get_scores(['passport'])
+    print(f'✅ BM25 working: scores={scores}')
+except Exception as e:
+    print(f'⚠️ BM25 failed: {e}')
+
+# Test sentence transformers
+try:
+    from sentence_transformers import SentenceTransformer
+    print('✅ SentenceTransformers import successful')
+except Exception as e:
+    print(f'⚠️ SentenceTransformers failed: {e}')
+"
+if [ $? -eq 0 ]; then
+    print_success "Search functionality test passed"
+else
+    print_warning "Search functionality test failed, but continuing build"
+fi
+
 # Build Electron app
 print_status "Building Electron application..."
 

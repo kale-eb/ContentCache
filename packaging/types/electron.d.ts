@@ -13,10 +13,12 @@ export interface ElectronAPI {
     date_filter?: string
     location_filter?: string
     top_k?: number
+    offset?: number
   }) => Promise<{ success: boolean }>
   
   // System operations
   getSystemStatus: () => Promise<{ success: boolean }>
+  startSearchServer: () => Promise<{ success: boolean; error?: string }>
   
   // Event listeners with cleanup
   onFilesSelected: (callback: (filePaths: string[]) => void) => () => void
