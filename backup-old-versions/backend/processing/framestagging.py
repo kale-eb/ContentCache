@@ -306,7 +306,7 @@ def process_frames_with_moondream_api(frames_dir, vid_path):
         print(f"✓ Moondream API processed {len(frame_captions)} frames")
         return frame_captions
 
-def deduplicate_captions(captions, frame_paths, threshold=0.85):
+def deduplicate_captions(captions, frame_paths, threshold=0.5):
     # Use the global model instance instead of creating a new one
     global sentence_model
     
